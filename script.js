@@ -26,8 +26,33 @@
     });
   }
   
+  // ===== Blacklist =====
+  let BLACKLIST = [];
+  async function loadBlacklist() {
+    try {
+      const res = await fetch('config/blacklist.json');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      BLACKLIST = Array.isArray(data.domains || data.blacklist || data) ? (data.domains || data.blacklist || data) : [];
+      console.log('🚫 Blacklist loaded:', BLACKLIST.length, 'domains');
+    } catch (e) {
+      console.warn('Blacklist file not available, using defaults:', e.message);
+      BLACKLIST = [
+        'roblox.com', 'discord.com', 'discord.gg', 'discordapp.com',
+        'youtube.com', 'netflix.com', 'twitch.tv', 'instagram.com',
+        'facebook.com', 'tiktok.com', 'snapchat.com', 'spotify.com'
+      ];
+    }
+  }
+  function isBlacklisted(url) {
+    try {
+      const host = new URL(url).hostname.replace(/^www\./, '');
+      return BLACKLIST.some(d => host === d || host.endsWith('.' + d));
+    } catch { return false; }
+  }
+
   // ===== State =====
-  let tabs = [{ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false }];
+  let tabs = [{ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false, contentCache: {} }];
   let favorites = JSON.parse(localStorage.getItem('peakx_favorites') || '[]');
   let tunnelStatus = 'connecting';
   let tunnelProxy = '...';
@@ -308,50 +333,100 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     }
   }
 
+  // ===== Sub-resource fetching via WISP (with cache) =====
+  const resourceCache = new Map(); // absoluteUrl -> Promise<{content, contentType}>
+  async function fetchResourceViaWisp(absUrl) {
+    if (resourceCache.has(absUrl)) return resourceCache.get(absUrl);
+    const promise = (async () => {
+      if (!libcurlReady) throw new Error('libcurl not ready');
+      libcurl.set_websocket(WISP_SERVER);
+      const resp = await libcurl.fetch(absUrl);
+      const ct = (resp.headers && (resp.headers['content-type'] || resp.headers['Content-Type'])) || '';
+      let content;
+      if (/text|json|xml|javascript|css|html|svg/i.test(ct) || !ct) {
+        content = await resp.text();
+      } else {
+        const buf = await resp.arrayBuffer();
+        // convert binary to data URL
+        const bytes = new Uint8Array(buf);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        content = 'data:' + (ct || 'application/octet-stream') + ';base64,' + btoa(bin);
+      }
+      return { content, contentType: ct };
+    })();
+    resourceCache.set(absUrl, promise);
+    promise.catch(() => resourceCache.delete(absUrl)); // don't cache failures
+    return promise;
+  }
+
   // ===== URL Rewriter =====
   function rewriteUrls(html, baseUrl) {
     try {
       const base = new URL(baseUrl);
-      
-      // Add base tag for relative URLs
-      if (!html.includes('<base')) {
-        html = html.replace(/<head([^>]*)>/i, `<head$1><base href="${base.origin}/">`);
-      }
-      
-      // Rewrite all relative URLs to absolute
-      const attributes = ['href', 'src', 'action', 'poster', 'data-src', 'data-href'];
-      
-      attributes.forEach(attr => {
-        // Match both single and double quotes
-        const regex = new RegExp(`${attr}=["']([^"']+)["']`, 'gi');
+
+      // Resolve any URL against the page's base and route it through the proxy runtime
+      const proxify = (rawUrl) => {
+        if (/^(javascript:|mailto:|tel:|data:|blob:|about:|#)/i.test(rawUrl)) return null;
+        try {
+          const abs = new URL(rawUrl, base).href;
+          if (!/^https?:\/\//i.test(abs)) return null;
+          return "window.__PEAKX_URL__('" + abs.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "')";
+        } catch {
+          return null;
+        }
+      };
+
+      // Rewrite src/href of resource tags to go through the WISP runtime loader
+      // <script src="..."> -> <script src="javascript:void(0)" data-peakx-src="...">
+      html = html.replace(/<script\b[^>]*?\bsrc=["']([^"']+)["'][^>]*>\s*<\/script>/gi, (match, url) => {
+        const target = (() => {
+          if (/^(javascript:|data:|blob:|#)/i.test(url)) return url;
+          try { return new URL(url, base).href; } catch { return url; }
+        })();
+        const attrs = match.match(/^<script\b([^>]*)>/i);
+        let extra = attrs ? attrs[1].replace(/\s*\b(src|type)=["'][^"']*["']/gi, '') : '';
+        // preserve type="module" by converting to classic load via import fallback
+        return `<script${extra} data-peakx-src="${target}"><\/script>`;
+      });
+
+      html = html.replace(/<(link|img|source|video|audio|iframe|embed|track)\b([^>]*)\bsrc=["']([^"']+)["']([^>]*)>/gi,
+        (match, tag, pre, url, post) => {
+          const fullAttrs = pre + 'src="' + url + '"' + post;
+          if (tag === 'iframe' || tag === 'embed') {
+            // iframes/embeds get loaded as proxied documents by runtime
+            const t = (() => { try { return new URL(url, base).href; } catch { return url; } })();
+            return `<${tag}${pre}data-peakx-src="${t}" src="about:blank"${post}></${tag}>`;
+          }
+          const t = (() => { try { return new URL(url, base).href; } catch { return url; } })();
+          return `<${tag}${pre}data-peakx-src="${t}" src="about:blank"${post}>`;
+        });
+
+      // <link href="..."> for stylesheets/icons
+      html = html.replace(/<link\b([^>]*?)\bhref=["']([^"']+)["']([^>]*)>/gi, (match, pre, url, post) => {
+        if (/^(javascript:|data:|#)/i.test(url)) return match;
+        let t; try { t = new URL(url, base).href; } catch { return match; }
+        return `<link${pre}data-peakx-href="${t}" href="about:blank"${post}>`;
+      });
+
+      // <a href> / <form action>: keep absolute URLs (runtime intercepts clicks/submits)
+      const navAttrs = ['href', 'action', 'poster', 'data-src', 'data-href'];
+      navAttrs.forEach(attr => {
+        const regex = new RegExp(`\\b${attr}=["']([^"']+)["']`, 'gi');
         html = html.replace(regex, (match, url) => {
-          // Skip data URLs, javascript, mailto, tel, etc.
-          if (/^(javascript:|mailto:|tel:|data:|blob:|#)/i.test(url)) {
-            return match;
-          }
-          
-          try {
-            const absolute = new URL(url, base).href;
-            return `${attr}="${absolute}"`;
-          } catch {
-            return match;
-          }
+          if (/^(javascript:|mailto:|tel:|data:|blob:|#)/i.test(url)) return match;
+          try { return match.replace(url, new URL(url, base).href); } catch { return match; }
         });
       });
-      
-      // Rewrite CSS url() references
+
+      // Inline <style> blocks and style attr url(): fetch via runtime at load time is hard in CSS,
+      // so we resolve them to absolute URLs and let the browser fetch them directly (best effort),
+      // while same-origin-critical assets were already proxied above.
       html = html.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, url) => {
-        if (/^(data:|#)/i.test(url)) {
-          return match;
-        }
-        try {
-          const absolute = new URL(url, base).href;
-          return `url("${absolute}")`;
-        } catch {
-          return match;
-        }
+        if (/^(data:|#)/i.test(url)) return match;
+        try { return `url("${new URL(url, base).href}")`; } catch { return match; }
       });
-      
+
       return html;
     } catch (error) {
       console.warn('Failed to rewrite URLs:', error);
@@ -363,53 +438,206 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
   function injectRuntime(html, pageUrl) {
     // Escape pageUrl for JavaScript
     const escapedUrl = pageUrl.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-    
+
     const runtimeScript = `
       <script>
-        // PEAKX Runtime - Intercept navigation
+        // PEAKX Runtime - full interception + WISP sub-resource loader
         (function() {
           const PAGE_URL = "${escapedUrl}";
-          
-          // Intercept link clicks
+
+          function resolve(u) { try { return new URL(u, PAGE_URL).href; } catch { return u; } }
+
+          function notifyParent(msg) { try { window.parent.postMessage(msg, '*'); } catch(e){} }
+
+          // ---- Resource loader via parent WISP fetch ----
+          let reqId = 0;
+          const pendingReqs = {};
+          function wispFetch(url) {
+            return new Promise((resolveP, rejectP) => {
+              const id = ++reqId;
+              pendingReqs[id] = { resolve: resolveP, reject: rejectP };
+              notifyParent({ type: 'peakx-fetch', id: id, url: url });
+              setTimeout(() => { if (pendingReqs[id]) { delete pendingReqs[id]; rejectP(new Error('fetch timeout')); } }, 20000);
+            });
+          }
+          window.addEventListener('message', (e) => {
+            const d = e.data;
+            if (!d || !d.__peakxResp) return;
+            const p = pendingReqs[d.id];
+            if (!p) return;
+            delete pendingReqs[d.id];
+            if (d.ok) p.resolve(d); else p.reject(new Error(d.error || 'WISP fetch failed'));
+          });
+
+          async function loadScript(el) {
+            const src = el.getAttribute('data-peakx-src');
+            if (!src) return;
+            try {
+              const r = await wispFetch(src);
+              const s = document.createElement('script');
+              s.textContent = r.content;
+              if (el.defer) s.defer = true;
+              document.head.appendChild(s);
+            } catch (err) { console.warn('PEAKX: failed to load script', src, err); }
+          }
+
+          async function loadLink(el) {
+            const href = el.getAttribute('data-peakx-href');
+            if (!href) return;
+            const rel = (el.getAttribute('rel') || '').toLowerCase();
+            if (rel.includes('stylesheet')) {
+              try {
+                const r = await wispFetch(href);
+                let css = r.content;
+                // rewrite CSS url(...) references to absolute (browser fetches them directly; best effort)
+                css = css.replace(/url\\((["']?)([^"')]+)\\1\\)/gi, (m, q, u) => {
+                  if (/^(data:|#)/i.test(u)) return m;
+                  return 'url("' + resolve(u) + '")';
+                });
+                const st = document.createElement('style');
+                st.textContent = css;
+                document.head.appendChild(st);
+              } catch (err) { console.warn('PEAKX: failed to load stylesheet', href, err); }
+            } else if (rel.includes('icon')) {
+              el.href = href; // favicons can load directly
+            } else {
+              el.href = href;
+            }
+          }
+
+          async function loadImage(el) {
+            const src = el.getAttribute('data-peakx-src');
+            if (!src) return;
+            try {
+              const r = await wispFetch(src);
+              el.src = r.dataUrl || ('data:' + (r.contentType || 'image/png') + ';base64,' + r.base64);
+            } catch (err) {
+              // fallback: direct URL (may work if not blocked)
+              el.src = resolve(src);
+            }
+          }
+
+          function processNode(node) {
+            if (!node || node.nodeType !== 1) return;
+            if (node.tagName === 'SCRIPT' && node.hasAttribute('data-peakx-src')) loadScript(node);
+            else if (node.tagName === 'LINK' && node.hasAttribute('data-peakx-href')) loadLink(node);
+            else if (node.tagName === 'IMG' && node.hasAttribute('data-peakx-src')) loadImage(node);
+            else if (node.hasAttribute('data-peakx-src')) {
+              const t = node.getAttribute('data-peakx-src');
+              if (node.tagName === 'IFRAME' || node.tagName === 'EMBED' || node.tagName === 'SOURCE' || node.tagName === 'TRACK' || node.tagName === 'VIDEO' || node.tagName === 'AUDIO') {
+                node.src = resolve(t); // media/iframes: best-effort direct
+              }
+            }
+            const styleAttr = node.getAttribute && node.getAttribute('style');
+            if (styleAttr && /url\\(/i.test(styleAttr)) {
+              node.setAttribute('style', styleAttr.replace(/url\\((["']?)([^"')]+)\\1\\)/gi, (m, q, u) => /^(data:|#)/i.test(u) ? m : 'url("' + resolve(u) + '")'));
+            }
+          }
+
+          const observer = new MutationObserver((muts) => {
+            muts.forEach(m => {
+              m.addedNodes.forEach(n => { processNode(n); if (n.querySelectorAll) n.querySelectorAll('[data-peakx-src],[data-peakx-href]').forEach(processNode); });
+            });
+          });
+
+          function boot() {
+            observer.observe(document.documentElement, { childList: true, subtree: true });
+            document.querySelectorAll('script[data-peakx-src],link[data-peakx-href],img[data-peakx-src],[data-peakx-src]').forEach(processNode);
+          }
+          if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
+
+          // ---- Title reporting ----
+          function reportTitle() {
+            if (document.title) notifyParent({ type: 'peakx-title', url: PAGE_URL, title: document.title });
+          }
+          new MutationObserver(reportTitle).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+          window.addEventListener('load', reportTitle);
+          setTimeout(reportTitle, 500);
+
+          // ---- Navigation interception ----
           document.addEventListener('click', function(e) {
-            const link = e.target.closest('a');
-            if (link && link.href && !link.href.startsWith('javascript:')) {
+            const link = e.target.closest && e.target.closest('a');
+            if (link && link.href && !/^javascript:/i.test(link.href)) {
+              if (link.target === '_blank') { /* let postMessage handle as new tab nav */ }
               e.preventDefault();
               e.stopPropagation();
-              window.parent.postMessage({
-                type: 'navigate',
-                url: link.href
-              }, '*');
+              notifyParent({ type: 'navigate', url: link.href });
             }
           }, true);
-          
-          // Intercept form submissions
+
           document.addEventListener('submit', function(e) {
             const form = e.target;
-            if (form && form.action) {
+            if (form && form.tagName === 'FORM') {
               e.preventDefault();
               e.stopPropagation();
-              window.parent.postMessage({
-                type: 'form-submit',
-                url: form.action,
-                method: form.method || 'GET'
-              }, '*');
+              const method = (form.method || 'GET').toUpperCase();
+              if (method === 'GET') {
+                const params = new URLSearchParams(new FormData(form)).toString();
+                const base = resolve(form.action || PAGE_URL).split('#')[0];
+                notifyParent({ type: 'navigate', url: base + (params ? (base.includes('?') ? '&' : '?') + params : '') });
+              } else {
+                notifyParent({ type: 'form-submit', url: resolve(form.action || PAGE_URL), method: method, body: JSON.stringify(Object.fromEntries(new FormData(form).entries())) });
+              }
             }
           }, true);
-          
-          // Intercept window.open
-          const originalOpen = window.open;
-          window.open = function(url, name, features) {
-            if (url && !url.startsWith('javascript:')) {
-              window.parent.postMessage({
-                type: 'navigate',
-                url: url
-              }, '*');
-              return null;
-            }
-            return originalOpen.call(this, url, name, features);
+
+          // ---- location.href / assign / replace interception ----
+          try {
+            const navTo = (u) => notifyParent({ type: 'navigate', url: resolve(u) });
+            window.location.assign = function(u) { navTo(u); };
+            window.location.replace = function(u) { navTo(u); };
+            // window.open -> navigate in same tab context
+            const originalOpen = window.open;
+            window.open = function(url) {
+              if (url && !/^javascript:/i.test(url)) { navTo(url); return null; }
+              return originalOpen.apply(this, arguments);
+            };
+          } catch (e) { console.warn('PEAKX: location hook limited', e); }
+
+          // ---- fetch / XMLHttpRequest interception via WISP ----
+          const origFetch = window.fetch.bind(window);
+          window.fetch = function(input, init) {
+            try {
+              const u = typeof input === 'string' ? input : (input && input.url) || String(input);
+              if (/^https?:/i.test(resolve(u)) && !resolve(u).startsWith(PAGE_URL.origin || '')) {
+                return wispFetch(resolve(u)).then(r => new Response(r.content, { status: r.status || 200, headers: { 'Content-Type': r.contentType || 'text/plain' } }));
+              }
+            } catch (e) {}
+            return origFetch(input, init);
           };
-          
+
+          const OrigXHR = window.XMLHttpRequest;
+          window.XMLHttpRequest = function() {
+            const xhr = new OrigXHR();
+            const origOpen = xhr.open;
+            let targetUrl = '';
+            xhr.open = function(method, url) {
+              targetUrl = resolve(url);
+              return origOpen.apply(xhr, [method, 'data:,']); // avoid direct network
+            };
+            const origSend = xhr.send;
+            xhr.send = function(body) {
+              wispFetch(targetUrl).then(r => {
+                Object.defineProperty(xhr, 'status', { get: () => r.status || 200 });
+                Object.defineProperty(xhr, 'readyState', { get: () => 4 });
+                Object.defineProperty(xhr, 'responseText', { get: () => r.content });
+                Object.defineProperty(xhr, 'response', { get: () => r.content });
+                xhr.onreadystatechange && xhr.onreadystatechange();
+                xhr.onload && xhr.onload();
+                xhr.onloadend && xhr.onloadend();
+              }).catch(err => { xhr.onerror && xhr.onerror(err); });
+            };
+            return xhr;
+          };
+
+          // ---- meta refresh interception ----
+          const meta = document.querySelector('meta[http-equiv="refresh" i]');
+          if (meta) {
+            const c = meta.getAttribute('content') || '';
+            const m = c.match(/url=(.*)$/i);
+            if (m) { meta.remove(); notifyParent({ type: 'navigate', url: resolve(m[1].trim().replace(/^["']|["']$/g, '')) }); }
+          }
+
           console.log('PEAKX Runtime injected for:', PAGE_URL);
         })();
       <\/script>
@@ -543,7 +771,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
 
   function addNewTab() {
     tabs.forEach(t => t.isActive = false);
-    tabs.push({ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false });
+    tabs.push({ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false, contentCache: {} });
     renderTabs();
     
     // Clear content area when creating new tab
@@ -559,7 +787,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     tabs = tabs.filter(t => t.id !== id);
     
     if (tabs.length === 0) {
-      tabs.push({ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false });
+      tabs.push({ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false, contentCache: {} });
       renderTabs();
       showHome();
     } else if (wasActive) {
@@ -591,7 +819,6 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       showBrowser();
       // Restore the content for this tab
       const contentArea = document.getElementById('contentArea');
-      const iframe = contentArea.querySelector('iframe');
       
       // Update URL bar
       document.getElementById('navUrl').value = active.url;
@@ -599,18 +826,26 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       document.getElementById('currentUrl').textContent = active.url;
       updateNavButtons();
       
-      // If iframe exists but has different content, reload
-      if (iframe && iframe.srcdoc) {
-        // Content is already there, just make sure it's visible
-        console.log('Switched to tab with URL:', active.url);
-      } else if (active.url && !iframe) {
-        // Need to reload the page
+      // If cached content exists for this tab's URL, restore it instantly (no refetch)
+      if (active.contentCache && active.contentCache[active.url]) {
+        const cached = active.contentCache[active.url];
+        const existing = contentArea.querySelector('iframe');
+        if (!existing || existing.getAttribute('data-peakx-url') !== active.url) {
+          const iframe = document.createElement('iframe');
+          iframe.className = 'content-iframe';
+          iframe.setAttribute('data-peakx-url', active.url);
+          iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups' + (active.muted ? '' : ' allow-autoplay'));
+          iframe.srcdoc = cached.html;
+          contentArea.innerHTML = '';
+          contentArea.appendChild(iframe);
+        }
+      } else if (active.url && !contentArea.querySelector('iframe')) {
+        // Need to load the page
         navigateTo(active.url, active.id);
       }
     } else {
       showHome();
-      // Clear content area
-      const contentArea = document.getElementById('contentArea');
+      // Clear content area (contentArea already declared above)
       contentArea.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#333;background:#0a0a0a;"><p>Ready to browse</p></div>';
     }
   }
@@ -647,6 +882,47 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     const tab = tabId ? tabs.find(t => t.id === tabId) : getActiveTab();
     if (!tab) return;
     const normalized = normalizeUrl(url);
+
+    // Blacklist check
+    if (isBlacklisted(normalized)) {
+      showBrowser();
+      document.getElementById('loadingBar').classList.remove('active');
+      const contentArea = document.getElementById('contentArea');
+      contentArea.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:40px;text-align:center;">
+          <h1 style="font-size:48px;margin:0 0 16px;">🚫</h1>
+          <p style="color:#fff;font-size:18px;font-weight:600;">Site blocked by PeakX blacklist</p>
+          <p style="color:#555;font-size:12px;margin-top:12px;word-break:break-all;max-width:400px;">${normalized}</p>
+        </div>
+      `;
+      return;
+    }
+
+    // Tab content cache: instant restore when revisiting a known URL
+    if (tab.contentCache && tab.contentCache[normalized]) {
+      const cached = tab.contentCache[normalized];
+      tab.url = normalized;
+      tab.title = cached.title || getPageTitle(normalized);
+      const idx = tab.history.indexOf(normalized);
+      if (idx >= 0) { tab.historyIndex = idx; } else {
+        tab.history = tab.history.slice(0, tab.historyIndex + 1).concat([normalized]);
+        tab.historyIndex = tab.history.length - 1;
+      }
+      renderTabs();
+      showBrowser();
+      document.getElementById('navUrl').value = normalized;
+      document.getElementById('homeNavInput').value = normalized;
+      document.getElementById('currentUrl').textContent = normalized;
+      updateNavButtons();
+      const contentArea = document.getElementById('contentArea');
+      const iframe = document.createElement('iframe');
+      iframe.className = 'content-iframe';
+      iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups' + (tab.muted ? '' : ' allow-autoplay'));
+      iframe.srcdoc = cached.html;
+      contentArea.innerHTML = '';
+      contentArea.appendChild(iframe);
+      return;
+    }
 
     // Close AI chat when navigating
     closeAIChat();
@@ -701,9 +977,21 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       // Inject runtime script
       content = injectRuntime(content, normalized);
       
+      // Extract real <title> from proxied page (fallback to hostname until runtime reports it)
+      const titleMatch = content.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+      if (titleMatch && titleMatch[1].trim()) {
+        tab.title = titleMatch[1].trim().slice(0, 60);
+        renderTabs();
+      }
+
+      // Cache rendered HTML per tab so switching tabs / back-forward is instant
+      tab.contentCache = tab.contentCache || {};
+      tab.contentCache[normalized] = { html: content, title: tab.title };
+
       // Create iframe with srcdoc
       const iframe = document.createElement('iframe');
       iframe.className = 'content-iframe';
+      iframe.setAttribute('data-peakx-url', normalized);
       iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups' + (tab.muted ? '' : ' allow-autoplay'));
       iframe.srcdoc = content;
       
@@ -960,7 +1248,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
 
   document.getElementById('homeBtn').addEventListener('click', () => {
     tabs.forEach(t => t.isActive = false);
-    tabs.push({ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false });
+    tabs.push({ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false, contentCache: {} });
     renderTabs();
     showHome();
   });
@@ -1068,12 +1356,43 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     }
   });
 
+  // ===== Bridge: answer sub-resource fetch requests coming from proxied iframes =====
+  async function handlePeakxFetch(event, d) {
+    const iframe = event.source && event.source.frameElement;
+    const pageUrl = iframe && iframe.getAttribute('data-peakx-url');
+    const respond = (payload) => { try { event.source.postMessage({ __peakxResp: true, id: d.id, ...payload }, '*'); } catch (e) {} };
+    try {
+      if (!pageUrl || !d.url) throw new Error('no context');
+      const abs = new URL(d.url, pageUrl).href;
+      if (isBlacklisted(abs)) throw new Error('blocked');
+      const r = await fetchResourceViaWisp(abs);
+      if (typeof r.content === 'string') {
+        respond({ ok: true, content: r.content, contentType: r.contentType, status: 200 });
+      } else {
+        respond({ ok: true, dataUrl: r.content, contentType: r.contentType, status: 200 });
+      }
+    } catch (err) {
+      respond({ ok: false, error: err.message });
+    }
+  }
+
   // Listen for messages from iframe
   window.addEventListener('message', (event) => {
-    if (event.data?.type === 'navigate' && event.data.url) {
-      navigateTo(event.data.url);
-    } else if (event.data?.type === 'form-submit') {
-      navigateTo(event.data.url);
+    const d = event.data;
+    if (!d || typeof d !== 'object') return;
+    if (d.type === 'navigate' && d.url) {
+      navigateTo(d.url);
+    } else if (d.type === 'form-submit') {
+      navigateTo(d.url);
+    } else if (d.type === 'peakx-title' && d.title) {
+      const tab = getActiveTab();
+      if (tab && tab.url === d.url) {
+        tab.title = String(d.title).slice(0, 60);
+        if (tab.contentCache && tab.contentCache[d.url]) tab.contentCache[d.url].title = tab.title;
+        renderTabs();
+      }
+    } else if (d.type === 'peakx-fetch' && d.id) {
+      handlePeakxFetch(event, d);
     }
   });
 
@@ -1087,6 +1406,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
   }
   
   try {
+    loadBlacklist(); // async; uses hardcoded fallback if file missing (e.g. opened via file://)
     createParticles();
     updateClock();
     setInterval(updateClock, 1000);
