@@ -396,7 +396,7 @@
   <div class="modal-overlay" id="wispSettingsModal">
     <div class="modal-content">
       <div class="modal-title">Proxy Configuration</div>
-      <p style="color:#888;font-size:12px;margin-bottom:16px;">Enter WISP server URLs (one per line). The browser will try each server in order, and fall back to CORS proxy if all fail.</p>
+      <p style="color:#888;font-size:12px;margin-bottom:16px;">Enter WISP server URLs (one per line). The browser will try each server in order. If all fail, an error is shown (WISP only).</p>
       <textarea class="modal-input" id="wispServersInput" rows="5" style="resize:vertical;font-family:monospace;font-size:12px;"></textarea>
       <p style="color:#666;font-size:11px;margin-top:8px;">Example: wss://your-wisp-server.com/</p>
       <div class="modal-actions">
@@ -445,7 +445,6 @@
     let draggedTab = null;
     let chatHistory = [];
     let libcurlReady = false;
-    let useCorsProxy = false; // Fallback to CORS proxy when WISP fails
 
     // ===== Helpers =====
     function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
@@ -633,55 +632,7 @@
       }
     }
 
-    // ===== CORS Proxy Configuration =====
-    const CORS_PROXIES = [
-      'https://api.allorigins.win/raw?url=',
-      'https://corsproxy.io/?',
-      'https://api.codetabs.com/v1/proxy?quest=',
-      'https://cors-anywhere.herokuapp.com/',
-      'https://thingproxy.freeboard.io/fetch/'
-    ];
     
-    // ===== Fetch via CORS Proxy (Fallback) =====
-    async function fetchViaCorsProxy(url, proxyIndex = 0) {
-      const proxy = CORS_PROXIES[proxyIndex % CORS_PROXIES.length];
-      const proxyUrl = proxy + encodeURIComponent(url);
-      
-      console.log(`🔄 Trying CORS proxy ${proxyIndex + 1}/${CORS_PROXIES.length}: ${proxy}`);
-      
-      try {
-        const response = await fetch(proxyUrl, {
-          method: 'GET',
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-          }
-        });
-        
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-        
-        const content = await response.text();
-        
-        if (!content || content.length < 100) {
-          throw new Error('Received empty or invalid content');
-        }
-        
-        console.log('✅ Fetched via CORS proxy:', content.length, 'bytes');
-        return { success: true, content, url, proxy: proxy };
-      } catch (error) {
-        console.error(`❌ CORS proxy ${proxy} failed:`, error.message);
-        
-        // Try next proxy
-        if (proxyIndex < CORS_PROXIES.length - 1) {
-          return fetchViaCorsProxy(url, proxyIndex + 1);
-        }
-        
-        throw error;
-      }
-    }
-
-    // ===== Fetch via libcurl (WISP) =====
     async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       if (!libcurlReady) {
         throw new Error('libcurl.js not initialized');
@@ -786,7 +737,7 @@
           const regex = new RegExp(`${attr}=["']([^"']+)["']`, 'gi');
           html = html.replace(regex, (match, url) => {
             // Skip data URLs, javascript, mailto, tel, etc.
-            if (url.startsWith('') || url.startsWith('javascript:') || 
+            if (url.startsWith('data:') || url.startsWith('javascript:') || 
                 url.startsWith('mailto:') || url.startsWith('tel:') || 
                 url.startsWith('#') || url.startsWith('blob:')) {
               return match;
@@ -803,7 +754,7 @@
         
         // Rewrite CSS url() references
         html = html.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, url) => {
-          if (url.startsWith('') || url.startsWith('#')) {
+          if (url.startsWith('data:') || url.startsWith('#')) {
             return match;
           }
           try {
@@ -1143,37 +1094,16 @@
       try {
         let result;
         
-        console.log('🔍 Starting navigation. useCorsProxy:', useCorsProxy);
+        console.log('🔍 Starting navigation via WISP...');
+
+        // WISP only - no alternative proxies. If WISP fails, show an error.
+        const fetchPromise = fetchViaWisp(normalized);
+        const timeoutPromise = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('WISP request timeout after 15 seconds')), 15000)
+        );
         
-        // Try WISP first if enabled
-        if (!useCorsProxy) {
-          try {
-            console.log('🌐 Attempting WISP connection...');
-            const fetchPromise = fetchViaWisp(normalized);
-            const timeoutPromise = new Promise((_, reject) => 
-              setTimeout(() => reject(new Error('WISP request timeout after 15 seconds')), 15000)
-            );
-            
-            result = await Promise.race([fetchPromise, timeoutPromise]);
-            console.log('✅ WISP connection successful');
-          } catch (wispError) {
-            console.warn('⚠️ WISP failed, falling back to CORS proxy:', wispError.message);
-            useCorsProxy = true;
-            tunnelStatus = 'connected';
-            tunnelProxy = 'CORS Proxy (WISP failed)';
-            updateStatus();
-            
-            console.log('🔄 Now attempting CORS proxy fallback...');
-            // Fall back to CORS proxy
-            result = await fetchViaCorsProxy(normalized);
-            console.log('✅ CORS proxy successful');
-          }
-        } else {
-          // Use CORS proxy directly
-          console.log('🌐 Using CORS proxy directly...');
-          result = await fetchViaCorsProxy(normalized);
-          console.log('✅ CORS proxy successful');
-        }
+        result = await Promise.race([fetchPromise, timeoutPromise]);
+        console.log('✅ WISP connection successful');
         
         // Check if content is valid
         if (!result.content || result.content.length < 100) {
@@ -1208,14 +1138,9 @@
         renderTabs();
         document.getElementById('loadingBar').classList.remove('active');
         
-        // Update tunnel status based on what worked
-        if (result.proxy) {
-          tunnelStatus = 'connected';
-          tunnelProxy = 'CORS Proxy';
-        } else {
-          tunnelStatus = 'connected';
-          tunnelProxy = 'WISP';
-        }
+        // Update tunnel status (WISP only)
+        tunnelStatus = 'connected';
+        tunnelProxy = 'WISP';
         updateStatus();
         
         // Save to history
@@ -1245,11 +1170,11 @@
             <p style="color:#ef4444;margin:8px 0;font-size:14px;">${errorMessage}</p>
             ${errorDetails ? `<p style="color:#f59e0b;margin:8px 0;font-size:12px;padding:8px;background:#1a1a1a;border-radius:6px;">${errorDetails}</p>` : ''}
             <p style="color:#444;font-size:12px;margin-top:16px;padding:12px;background:#111;border-radius:8px;word-break:break-all;max-width:400px;">${normalized}</p>
-            <p style="color:#555;font-size:12px;margin-top:12px;">WISP server may be down. The browser will automatically try CORS proxy as fallback, or you can configure different WISP servers.</p>
+            <p style="color:#555;font-size:12px;margin-top:12px;">WISP server may be down. Configure different WISP servers or retry the request.</p>
             <div style="display:flex;gap:10px;margin-top:20px;">
               <button onclick="navigateTo('${normalized}')" style="padding:10px 20px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">Retry</button>
               <button onclick="document.getElementById('settingsBtn').click()" style="padding:10px 20px;background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:8px;cursor:pointer;font-size:14px;">Configure WISP</button>
-              <button onclick="useCorsProxy = false; navigateTo('${normalized}')" style="padding:10px 20px;background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:8px;cursor:pointer;font-size:14px;">Force WISP</button>
+              
             </div>
           </div>
         `;
@@ -1284,15 +1209,13 @@
       const text = document.getElementById('statusText2');
       dot.className = 'status-dot' + (tunnelStatus === 'connected' ? '' : tunnelStatus === 'connecting' ? ' connecting' : ' disconnected');
       
-      // Show appropriate label based on proxy type
-      const proxyLabel = tunnelProxy.includes('CORS') ? 'Proxy' : 'WISP';
-      text.textContent = `${proxyLabel}: ${tunnelProxy}`;
+      text.textContent = `WISP: ${tunnelProxy}`;
       
       const homeDot = document.getElementById('statusDot');
       const homeText = document.getElementById('statusText');
       if (homeDot && homeText) {
         homeDot.className = 'status-dot' + (tunnelStatus === 'connected' ? '' : tunnelStatus === 'connecting' ? ' connecting' : ' disconnected');
-        homeText.textContent = `${proxyLabel}: ${tunnelProxy}`;
+        homeText.textContent = `WISP: ${tunnelProxy}`;
       }
     }
 
@@ -1518,12 +1441,13 @@
       
       if (result.success) {
         alert(`✅ WISP Connection successful!\n\nBest server: ${result.bestServer.server}\nLatency: ${result.bestServer.latency}ms\n\nResults:\n${result.results.map(r => `${r.server.split('/')[2]}: ${r.message}`).join('\n')}`);
-        useCorsProxy = false; // Use WISP if it works
-      } else {
-        alert(`❌ WISP Connection failed!\n\nAll servers failed to connect. The browser will automatically use CORS proxy as fallback.\n\nTry:\n1. Check your internet connection\n2. Add different WISP servers\n3. Check if any servers are temporarily down\n\nResults:\n${result.results.map(r => `${r.server.split('/')[2]}: ${r.message}`).join('\n')}`);
-        useCorsProxy = true; // Use CORS proxy as fallback
         tunnelStatus = 'connected';
-        tunnelProxy = 'CORS Proxy (WISP failed)';
+        tunnelProxy = 'WISP';
+        updateStatus();
+      } else {
+        alert(`❌ WISP Connection failed!\n\nAll servers failed to connect. There is no alternative proxy - requests will fail until a WISP server is reachable.\n\nTry:\n1. Check your internet connection\n2. Add different WISP servers\n3. Check if any servers are temporarily down\n\nResults:\n${result.results.map(r => `${r.server.split('/')[2]}: ${r.message}`).join('\n')}`);
+        tunnelStatus = 'disconnected';
+        tunnelProxy = 'disconnected';
         updateStatus();
       }
     });
@@ -1659,29 +1583,27 @@
           console.log('🧪 WISP test result:', testResult);
           if (testResult.success) {
             console.log('✅ PEAKX ready with libcurl.js + WISP');
-            useCorsProxy = false; // Use WISP if it works
-          } else {
-            console.warn('⚠️ PEAKX initialized but WISP connection test failed, will use CORS proxy fallback');
-            useCorsProxy = true; // Fall back to CORS proxy
             tunnelStatus = 'connected';
-            tunnelProxy = 'CORS Proxy (WISP unavailable)';
+            tunnelProxy = 'WISP';
+            updateStatus();
+          } else {
+            console.warn('⚠️ PEAKX initialized but WISP connection test failed - no WISP server available');
+            tunnelStatus = 'disconnected';
+            tunnelProxy = 'disconnected';
             updateStatus();
           }
         });
       } else {
-        // Even if initialization fails, mark as connected with warning and use CORS proxy
-        console.warn('⚠️ libcurl initialization returned false, using CORS proxy');
-        useCorsProxy = true;
-        tunnelStatus = 'connected';
-        tunnelProxy = 'CORS Proxy (WISP failed)';
+        // Without libcurl there is no tunnel and no alternative proxy
+        console.warn('⚠️ libcurl initialization failed - WISP unavailable');
+        tunnelStatus = 'disconnected';
+        tunnelProxy = 'unavailable';
         updateStatus();
-        console.warn('⚠️ PEAKX initialized with CORS proxy fallback');
       }
     }).catch(error => {
       console.error('❌ libcurl initialization error:', error);
-      useCorsProxy = true;
-      tunnelStatus = 'connected';
-      tunnelProxy = 'CORS Proxy (error)';
+      tunnelStatus = 'disconnected';
+      tunnelProxy = 'error';
       updateStatus();
     });
   </script>
