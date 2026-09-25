@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PEAKX Browser v1.0.1</title>
+  <link rel="icon" href="PeakxLogo.png" />
+  
+  <!-- libcurl.js - HTTP client compiled to WebAssembly -->
+  <script src="https://cdn.jsdelivr.net/npm/libcurl.js@latest/libcurl_full.js" defer></script>
+  
+  <!-- Fallback error handler -->
+  <script>
+    window.addEventListener('error', function(event) {
+      console.error('Global error:', event.error);
+      const loadingMessage = document.getElementById('loadingMessage');
+      if (loadingMessage && event.message && event.message.includes('libcurl')) {
+        loadingMessage.innerHTML = `
+          <div style="color:#ef4444;">
+            <p style="font-size:18px;margin-bottom:10px;">⚠️ Failed to load libcurl.js</p>
+            <p style="font-size:14px;color:#888;">Check your internet connection and try again</p>
+            <button onclick="location.reload()" style="margin-top:20px;padding:10px 20px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;">Reload</button>
+          </div>
+        `;
+      }
+    });
+  </script>
+  
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #000000; overflow: hidden; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+
+    /* Particles */
+    .particles-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 0; overflow: hidden; }
+    .snowflake { position: absolute; top: -10px; background: white; border-radius: 50%; }
+    @keyframes snowfall { 0% { transform: translateY(-10px) translateX(0) rotate(0deg); opacity: 0.8; } 50% { opacity: 0.5; } 100% { transform: translateY(100vh) translateX(80px) rotate(360deg); opacity: 0; } }
+
+    /* Shell */
+    .browser-shell { display: flex; height: 100vh; width: 100vw; background: #000; position: relative; overflow: hidden; }
+    .main-content { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+
+    /* Home */
+    .home-screen { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; position: relative; z-index: 2; }
+    
+    /* Home Header */
+    .home-header { position: absolute; top: 0; left: 0; right: 0; background: #0a0a0a; border-bottom: 1px solid #1a1a1a; z-index: 100; }
+    .home-tabs-bar { display: flex; align-items: center; background: #0a0a0a; padding: 0 8px; min-height: 38px; gap: 2px; border-bottom: 1px solid #1a1a1a; overflow-x: auto; }
+    .home-nav-bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; }
+    .home-nav-btn { background: none; border: none; color: #555; cursor: pointer; padding: 8px; border-radius: 6px; display: flex; align-items: center; justify-content: center; transition: all 0.3s ease; flex-shrink: 0; position: relative; overflow: hidden; }
+    .home-nav-btn:hover { background: #1a1a1a; color: #fff; transform: scale(1.1); }
+    .home-nav-btn:active { transform: scale(0.95); }
+    .home-nav-btn::before { content: ''; position: absolute; top: 50%; left: 50%; width: 0; height: 0; border-radius: 50%; background: rgba(99, 102, 241, 0.3); transform: translate(-50%, -50%); transition: width 0.3s, height 0.3s; }
+    .home-nav-btn:hover::before { width: 40px; height: 40px; }
+    .home-nav-btn svg { position: relative; z-index: 1; }
+    .home-nav-btn.can-navigate { color: #fff; }
+    .home-nav-input { flex: 1; background: #111; border: 1px solid #1f1f1f; border-radius: 8px; padding: 8px 14px; font-size: 13px; color: #aaa; outline: none; transition: border-color 0.2s; }
+    .home-nav-input:focus { border-color: #6366f1; color: #fff; }
+    .nav-divider { width: 1px; height: 24px; background: #333; margin: 0 4px; }
+    
+    .top-bar { position: absolute; top: 90px; left: 0; right: 0; padding: 20px 28px; z-index: 10; }
+    .date-display { font-size: 14px; color: #fff; font-weight: 500; letter-spacing: 0.5px; }
+    .timezone-display { font-size: 24px; color: #fff; font-weight: 600; margin-top: 4px; }
+
+    /* Title */
+    .title-section { display: flex; flex-direction: column; align-items: center; z-index: 10; margin-top: -40px; }
+    .title-row { display: flex; align-items: center; gap: 16px; }
+    .title-logo { width: 80px; height: 80px; border-radius: 16px; object-fit: cover; }
+    .title-text { font-size: 52px; font-weight: 800; letter-spacing: -2px; background: linear-gradient(135deg, #fff 0%, #a5a5a5 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .version-tag { font-size: 11px; color: #6366f1; background: rgba(99,102,241,0.1); border: 1px solid rgba(99,102,241,0.3); padding: 3px 10px; border-radius: 20px; font-weight: 600; }
+
+    /* Search */
+    .search-section { display: flex; flex-direction: column; align-items: center; padding: 28px 24px; z-index: 10; width: 100%; }
+    .search-bar { display: flex; align-items: center; width: 100%; max-width: 580px; background: #0d0d0d; border: 1px solid #1f1f1f; border-radius: 14px; overflow: hidden; transition: border-color 0.3s, box-shadow 0.3s; }
+    .search-bar:focus-within { border-color: #6366f1; box-shadow: 0 0 0 3px rgba(99,102,241,0.15); }
+    .search-input { flex: 1; background: transparent; border: none; outline: none; padding: 15px 20px; font-size: 15px; color: #fff; }
+    .search-input::placeholder { color: #444; }
+    .search-btn { background: #6366f1; border: none; padding: 15px 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.2s; }
+    .search-btn:hover { background: #818cf8; }
+    .search-btn svg { width: 20px; height: 20px; color: #fff; }
+
+    /* Favorites */
+    .favorites-section { padding: 10px 24px 16px; z-index: 10; width: 100%; max-width: 580px; margin: 0 auto; }
+    .favorites-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .favorites-title { font-size: 11px; color: #555; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 600; }
+    .add-fav-btn { background: none; border: 1px solid #222; color: #666; font-size: 11px; padding: 4px 12px; border-radius: 6px; cursor: pointer; transition: all 0.2s; }
+    .add-fav-btn:hover { border-color: #6366f1; color: #6366f1; }
+    .favorites-grid { display: flex; flex-wrap: wrap; gap: 8px; }
+    .favorite-item { display: flex; align-items: center; gap: 8px; background: #0d0d0d; border: 1px solid #1a1a1a; border-radius: 8px; padding: 8px 14px; cursor: pointer; transition: all 0.2s; position: relative; }
+    .favorite-item:hover { border-color: #333; background: #141414; }
+    .favorite-item img { width: 16px; height: 16px; border-radius: 3px; }
+    .favorite-item span { font-size: 12px; color: #ccc; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .favorite-remove { position: absolute; top: -5px; right: -5px; width: 16px; height: 16px; background: #ef4444; border-radius: 50%; display: none; align-items: center; justify-content: center; font-size: 10px; color: white; cursor: pointer; border: 2px solid #000; line-height: 1; }
+    .favorite-item:hover .favorite-remove { display: flex; }
+
+    /* Status Bar */
+    .status-bar { display: flex; align-items: center; justify-content: space-between; padding: 6px 14px; background: #0a0a0a; border-top: 1px solid #1a1a1a; font-size: 11px; color: #444; flex-shrink: 0; }
+    .status-bar-bottom { position: absolute; bottom: 0; left: 0; right: 0; }
+    .status-indicator { display: flex; align-items: center; gap: 6px; }
+    .status-dot { width: 6px; height: 6px; border-radius: 50%; background: #22c55e; }
+    .status-dot.disconnected { background: #ef4444; }
+    .status-dot.connecting { background: #f59e0b; animation: pulse 1s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+    /* Browser View */
+    .browser-view { display: none; flex-direction: column; flex: 1; overflow: hidden; position: relative; z-index: 2; height: 100%; }
+    .browser-view.active { display: flex; }
+    .home-screen.hidden { display: none; }
+
+    .tabs-bar { display: flex; align-items: center; background: #0a0a0a; border-bottom: 1px solid #1a1a1a; padding: 0 8px; min-height: 38px; gap: 2px; overflow-x: auto; }
+    .tab-item { display: flex; align-items: center; gap: 8px; padding: 8px 14px; font-size: 12px; color: #888; background: transparent; border: none; border-radius: 8px 8px 0 0; cursor: pointer; transition: all 0.2s; max-width: 200px; user-select: none; }
+    .tab-item.active { background: #141414; color: #fff; }
+    .tab-item:hover:not(.active) { background: #0f0f0f; }
+    .tab-item.dragging { opacity: 0.5; }
+    .tab-item.pinned { max-width: 40px; padding: 8px; }
+    .tab-item.pinned .tab-title { display: none; }
+    .tab-item.pinned .tab-close { display: none; }
+    .tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
+    .tab-close { width: 16px; height: 16px; display: flex; align-items: center; justify-content: center; border-radius: 4px; font-size: 14px; color: #555; cursor: pointer; transition: all 0.2s; flex-shrink: 0; }
+    .tab-close:hover { background: #333; color: #fff; }
+    .new-tab-btn { background: none; border: none; color: #555; font-size: 18px; cursor: pointer; padding: 4px 10px; border-radius: 6px; transition: all 0.2s; }
+    .new-tab-btn:hover { background: #1a1a1a; color: #fff; }
+
+    .nav-bar { display: flex; align-items: center; gap: 6px; padding: 8px 12px; background: #0a0a0a; border-bottom: 1px solid #1a1a1a; }
+    .nav-btn { background: none; border: none; color: #555; cursor: pointer; padding: 6px; border-radius: 6px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; flex-shrink: 0; }
+    .nav-btn:hover { background: #1a1a1a; color: #fff; }
+    .nav-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+    .nav-btn.can-navigate { color: #fff; }
+    .nav-url { flex: 1; background: #111; border: 1px solid #1f1f1f; border-radius: 8px; padding: 8px 14px; font-size: 13px; color: #aaa; outline: none; transition: border-color 0.2s; }
+    .nav-url:focus { border-color: #6366f1; color: #fff; }
+
+    .content-area { flex: 1; position: relative; overflow: hidden; background: #fff; }
+    .content-iframe { width: 100%; height: 100%; border: none; background: #fff; display: block; }
+
+    .loading-bar { position: absolute; top: 0; left: 0; height: 2px; background: linear-gradient(90deg, #6366f1, #818cf8, #6366f1); animation: loading 1.5s ease-in-out infinite; z-index: 100; display: none; }
+    .loading-bar.active { display: block; }
+    @keyframes loading { 0% { width: 0%; left: 0; } 50% { width: 60%; left: 20%; } 100% { width: 0%; left: 100%; } }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner { width: 12px; height: 12px; border: 2px solid #333; border-top-color: #6366f1; border-radius: 50%; animation: spin 0.8s linear infinite; flex-shrink: 0; }
+
+    /* Context Menu */
+    .context-menu { position: fixed; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 4px 0; min-width: 160px; z-index: 2000; display: none; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+    .context-menu.active { display: block; }
+    .context-menu-item { padding: 8px 16px; font-size: 13px; color: #ccc; cursor: pointer; display: flex; align-items: center; gap: 8px; transition: background 0.2s; }
+    .context-menu-item:hover { background: #2a2a2a; color: #fff; }
+    .context-menu-item svg { width: 14px; height: 14px; }
+
+    /* History Popup */
+    .history-popup { position: fixed; top: 80px; left: 20px; background: #111; border: 1px solid #222; border-radius: 12px; width: 400px; max-height: 500px; overflow-y: auto; z-index: 1500; display: none; box-shadow: 0 8px 24px rgba(0,0,0,0.5); }
+    .history-popup.active { display: block; }
+    .history-popup-header { padding: 16px; border-bottom: 1px solid #222; font-size: 14px; font-weight: 600; color: #fff; }
+    .history-item { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #1a1a1a; cursor: pointer; transition: background 0.2s; }
+    .history-item:hover { background: #1a1a1a; }
+    .history-item img { width: 16px; height: 16px; border-radius: 2px; flex-shrink: 0; }
+    .history-item-content { flex: 1; min-width: 0; }
+    .history-item-url { font-size: 13px; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .history-item-meta { font-size: 11px; color: #666; margin-top: 2px; display: flex; gap: 12px; }
+
+    /* AI Chat Sidebar */
+    .ai-sidebar { width: 0; height: 100%; background: #0a0a0a; border-left: 1px solid #1a1a1a; display: flex; flex-direction: column; transition: width 0.3s ease; overflow: hidden; flex-shrink: 0; }
+    .ai-sidebar.active { width: 380px; }
+    .ai-sidebar-header { padding: 16px 20px; border-bottom: 1px solid #1a1a1a; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+    .ai-sidebar-title { font-size: 16px; font-weight: 600; color: #fff; white-space: nowrap; }
+    .ai-sidebar-close { background: none; border: none; color: #666; cursor: pointer; padding: 4px; border-radius: 4px; transition: all 0.2s; }
+    .ai-sidebar-close:hover { background: #1a1a1a; color: #fff; }
+    .ai-chat-messages { flex: 1; overflow-y: auto; padding: 20px; }
+    .ai-message { margin-bottom: 16px; padding: 12px 16px; border-radius: 12px; font-size: 14px; line-height: 1.5; word-wrap: break-word; }
+    .ai-message.user { background: #6366f1; color: #fff; margin-left: 40px; }
+    .ai-message.assistant { background: #1a1a1a; color: #ccc; margin-right: 10px; }
+    .ai-message.loading { background: #1a1a1a; color: #666; font-style: italic; }
+    .ai-chat-input-area { padding: 16px 20px; border-top: 1px solid #1a1a1a; display: flex; gap: 8px; flex-shrink: 0; }
+    .ai-chat-input { flex: 1; background: #111; border: 1px solid #222; border-radius: 8px; padding: 10px 14px; font-size: 14px; color: #fff; outline: none; resize: none; min-height: 40px; max-height: 120px; font-family: inherit; }
+    .ai-chat-input:focus { border-color: #6366f1; }
+    .ai-chat-send { background: #6366f1; border: none; color: #fff; padding: 10px 16px; border-radius: 8px; cursor: pointer; transition: background 0.2s; white-space: nowrap; }
+    .ai-chat-send:hover { background: #818cf8; }
+    .ai-chat-send:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Modal */
+    .modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); display: none; align-items: center; justify-content: center; z-index: 1000; }
+    .modal-overlay.active { display: flex; }
+    .modal-content { background: #111; border: 1px solid #222; border-radius: 14px; padding: 24px; width: 90%; max-width: 400px; }
+    .modal-title { font-size: 16px; font-weight: 600; color: #fff; margin-bottom: 16px; }
+    .modal-input { width: 100%; background: #0a0a0a; border: 1px solid #222; border-radius: 8px; padding: 10px 14px; font-size: 14px; color: #fff; outline: none; margin-bottom: 10px; }
+    .modal-input:focus { border-color: #6366f1; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    .modal-btn { padding: 8px 18px; border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer; border: none; transition: all 0.2s; }
+    .modal-btn-primary { background: #6366f1; color: #fff; }
+    .modal-btn-primary:hover { background: #818cf8; }
+    .modal-btn-secondary { background: #1a1a1a; color: #888; }
+    .modal-btn-secondary:hover { background: #222; color: #fff; }
+  </style>
+</head>
+  <body>
+    <!-- Loading message -->
+    <div id="loadingMessage" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);color:#666;font-family:sans-serif;text-align:center;z-index:9999;">
+      <div style="width:40px;height:40px;border:3px solid #333;border-top-color:#6366f1;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px;"></div>
+      <p>Loading PEAKX Browser...</p>
+    </div>
+    
+    <div class="browser-shell">    <div class="main-content">
+      <!-- Particles -->
+      <div class="particles-container" id="particlesContainer"></div>
+
+      <!-- Home Screen -->
+      <div class="home-screen" id="homeScreen">
+        <!-- Home Header -->
+        <div class="home-header">
+          <div class="home-tabs-bar" id="homeTabsBar"></div>
+          <form class="home-nav-bar" id="homeNavForm">
+            <button type="button" class="home-nav-btn" id="fullscreenBtn" title="Fullscreen">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+              </svg>
+            </button>
+            <button type="button" class="home-nav-btn" id="historyBtn" title="History">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <polyline points="12 6 12 12 16 14"/>
+              </svg>
+            </button>
+            <div class="nav-divider"></div>
+            <button type="button" class="home-nav-btn" id="homeBackBtn" disabled>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M19 12H5M12 19l-7-7 7-7"/>
+              </svg>
+            </button>
+            <button type="button" class="home-nav-btn" id="homeForwardBtn" disabled>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M5 12h14M12 5l7 7-7 7"/>
+              </svg>
+            </button>
+            <button type="button" class="home-nav-btn" id="homeReloadBtn">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+              </svg>
+            </button>
+            <button type="button" class="home-nav-btn" id="homeHomeBtn">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/>
+              </svg>
+            </button>
+            <input class="home-nav-input" type="text" id="homeNavInput" placeholder="Enter URL or search..." />
+            <div class="nav-divider"></div>
+            <button type="button" class="home-nav-btn" id="aiChatBtn" title="AI Chat">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+              </svg>
+            </button>
+            <button type="button" class="home-nav-btn" id="settingsBtn" title="Settings">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
+          </form>
+        </div>
+
+        <div class="top-bar">
+          <div>
+            <div class="date-display" id="dateDisplay"></div>
+            <div class="timezone-display" id="timezoneDisplay"></div>
+          </div>
+        </div>
+
+        <div class="title-section">
+          <div class="title-row">
+            <img src="PeakxLogo.png" alt="PEAKX" class="title-logo" onerror="this.src='https://via.placeholder.com/52x52/6366f1/ffffff?text=P'" />
+            <h1 class="title-text">PEAKX</h1>
+            <span class="version-tag">v1.0.1</span>
+          </div>
+        </div>
+
+        <div class="search-section">
+          <form class="search-bar" id="searchForm">
+            <input class="search-input" type="text" id="searchInput" placeholder="Enter the Website" autocomplete="off" />
+            <button type="submit" class="search-btn">
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
+              </svg>
+            </button>
+          </form>
+        </div>
+
+        <div class="favorites-section">
+          <div class="favorites-header">
+            <span class="favorites-title">Favorites</span>
+            <button class="add-fav-btn" id="addFavBtn">+ Add</button>
+          </div>
+          <div class="favorites-grid" id="favoritesGrid"></div>
+        </div>
+
+        <div class="status-bar status-bar-bottom">
+          <div class="status-indicator">
+            <div class="status-dot connecting" id="statusDot"></div>
+            <span id="statusText">Proxy: Connecting...</span>
+          </div>
+          <span>PEAKX Browser v1.0.1</span>
+        </div>
+      </div>
+
+      <!-- Browser View -->
+      <div class="browser-view" id="browserView">
+        <div class="tabs-bar" id="tabsBar"></div>
+        <form class="nav-bar" id="navForm">
+          <button type="button" class="nav-btn" id="backBtn" disabled>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+          </button>
+          <button type="button" class="nav-btn" id="forwardBtn" disabled>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+          </button>
+          <button type="button" class="nav-btn" id="reloadBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+          </button>
+          <input class="nav-url" type="text" id="navUrl" placeholder="Enter URL or search..." />
+          <button type="button" class="nav-btn" id="starBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"/></svg>
+          </button>
+          <button type="button" class="nav-btn" id="homeBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"/></svg>
+          </button>
+        </form>
+        <div class="loading-bar" id="loadingBar"></div>
+        <div class="content-area" id="contentArea">
+          <div style="display:flex;align-items:center;justify-content:center;height:100%;color:#333;background:#0a0a0a;">
+            <p>Ready to browse</p>
+          </div>
+        </div>
+        <div class="status-bar">
+          <div class="status-indicator">
+            <div class="status-dot" id="statusDot2"></div>
+            <span id="statusText2">Proxy: Connected</span>
+          </div>
+          <span id="currentUrl" style="max-width:60%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- AI Chat Sidebar -->
+    <div class="ai-sidebar" id="aiSidebar">
+      <div class="ai-sidebar-header">
+        <div class="ai-sidebar-title">AI Assistant</div>
+        <button class="ai-sidebar-close" id="aiClose">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
+      </div>
+      <div class="ai-chat-messages" id="aiMessages">
+        <div class="ai-message assistant">Hello! I'm your AI assistant. How can I help you today?</div>
+      </div>
+      <div class="ai-chat-input-area">
+        <textarea class="ai-chat-input" id="aiInput" placeholder="Type your message..." rows="1"></textarea>
+        <button class="ai-chat-send" id="aiSend">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Context Menu -->
+  <div class="context-menu" id="contextMenu">
+    <div class="context-menu-item" data-action="reload">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+      Reload Tab
+    </div>
+    <div class="context-menu-item" data-action="mute">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 5L6 9H2v6h4l5 4V5zM23 9l-6 6M17 9l6 6"/></svg>
+      Mute Tab
+    </div>
+    <div class="context-menu-item" data-action="pin">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L12 22M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+      Pin Tab
+    </div>
+    <div class="context-menu-item" data-action="close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      Close Tab
+    </div>
+  </div>
+
+  <!-- History Popup -->
+  <div class="history-popup" id="historyPopup">
+    <div class="history-popup-header">Search History</div>
+    <div id="historyList"></div>
+  </div>
+
+  <!-- Add Favorite Modal -->
+  <div class="modal-overlay" id="modalOverlay">
+    <div class="modal-content">
+      <div class="modal-title">Add Favorite</div>
+      <input class="modal-input" id="modalUrl" placeholder="URL (e.g., https://example.com)" />
+      <input class="modal-input" id="modalTitle" placeholder="Title (optional)" />
+      <div class="modal-actions">
+        <button class="modal-btn modal-btn-secondary" id="modalCancel">Cancel</button>
+        <button class="modal-btn modal-btn-primary" id="modalAdd">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- WISP Settings Modal -->
+  <div class="modal-overlay" id="wispSettingsModal">
+    <div class="modal-content">
+      <div class="modal-title">Proxy Configuration</div>
+      <p style="color:#888;font-size:12px;margin-bottom:16px;">Enter WISP server URLs (one per line). The browser will try each server in order. If all fail, an error is shown (WISP only).</p>
+      <textarea class="modal-input" id="wispServersInput" rows="5" style="resize:vertical;font-family:monospace;font-size:12px;"></textarea>
+      <p style="color:#666;font-size:11px;margin-top:8px;">Example: wss://your-wisp-server.com/</p>
+      <div class="modal-actions">
+        <button class="modal-btn modal-btn-secondary" id="wispTestConnection">Test WISP</button>
+        <button class="modal-btn modal-btn-secondary" id="wispSettingsCancel">Cancel</button>
+        <button class="modal-btn modal-btn-primary" id="wispSettingsSave">Save & Reconnect</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
