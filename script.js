@@ -304,7 +304,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       }
       
       // If we've tried all servers and retries, throw comprehensive error
-      throw new Error(`Failed to connect to any WISP server. Last attempted: ${currentServer}. Error: ${errorMessage}. Try checking your internet connection or configure different WISP servers in settings.`);
+      throw new Error(`Failed to connect to any WISP server. Last attempted: ${currentServer}. Error: ${errorMessage}. Try checking your internet connection.`);
     }
   }
 
@@ -756,11 +756,9 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
           <p style="color:#ef4444;margin:8px 0;font-size:14px;">${errorMessage}</p>
           ${errorDetails ? `<p style="color:#f59e0b;margin:8px 0;font-size:12px;padding:8px;background:#1a1a1a;border-radius:6px;">${errorDetails}</p>` : ''}
           <p style="color:#444;font-size:12px;margin-top:16px;padding:12px;background:#111;border-radius:8px;word-break:break-all;max-width:400px;">${normalized}</p>
-          <p style="color:#555;font-size:12px;margin-top:12px;">WISP server may be down. You can configure different WISP servers in settings.</p>
+          <p style="color:#555;font-size:12px;margin-top:12px;">WISP server may be down. Check your connection and try again.</p>
           <div style="display:flex;gap:10px;margin-top:20px;">
             <button onclick="navigateTo('${normalized}')" style="padding:10px 20px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">Retry</button>
-            <button onclick="document.getElementById('settingsBtn').click()" style="padding:10px 20px;background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:8px;cursor:pointer;font-size:14px;">Configure WISP</button>
-            
           </div>
         </div>
       `;
@@ -990,56 +988,6 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendAIMessage();
-    }
-  });
-
-  // WISP Settings
-  document.getElementById('settingsBtn').addEventListener('click', () => {
-    document.getElementById('wispSettingsModal').classList.add('active');
-    document.getElementById('wispServersInput').value = WISP_SERVERS.join('\n');
-  });
-
-  document.getElementById('wispSettingsCancel').addEventListener('click', () => {
-    document.getElementById('wispSettingsModal').classList.remove('active');
-  });
-
-  document.getElementById('wispSettingsSave').addEventListener('click', () => {
-    const serversText = document.getElementById('wispServersInput').value.trim();
-    const servers = serversText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
-    
-    if (servers.length === 0) {
-      alert('Please enter at least one WISP server URL');
-      return;
-    }
-    
-    updateWISPServers(servers);
-    document.getElementById('wispSettingsModal').classList.remove('active');
-    alert('WISP servers updated. Reconnecting...');
-  });
-
-  document.getElementById('wispTestConnection').addEventListener('click', async () => {
-    const testBtn = document.getElementById('wispTestConnection');
-    testBtn.disabled = true;
-    testBtn.textContent = 'Testing...';
-    
-    const result = await testWISPConnection();
-    
-    testBtn.disabled = false;
-    testBtn.textContent = 'Test Connection';
-    
-    if (result.success) {
-      alert(`✅ WISP Connection successful!\n\nBest server: ${result.bestServer.server}\nLatency: ${result.bestServer.latency}ms\n\nResults:\n${result.results.map(r => `${r.server.split('/')[2]}: ${r.message}`).join('\n')}`);
-    } else {
-      alert(`❌ WISP Connection failed!\n\nAll servers failed to connect. PeakX is WISP-only, so pages cannot load until a working server is configured.\n\nTry:\n1. Check your internet connection\n2. Add different WISP servers\n3. Check if any servers are temporarily down\n\nResults:\n${result.results.map(r => `${r.server.split('/')[2]}: ${r.message}`).join('\n')}`);
-      tunnelStatus = 'disconnected';
-      tunnelProxy = 'WISP (all servers failed)';
-      updateStatus();
-    }
-  });
-
-  document.getElementById('wispSettingsModal').addEventListener('click', (e) => {
-    if (e.target === document.getElementById('wispSettingsModal')) {
-      document.getElementById('wispSettingsModal').classList.remove('active');
     }
   });
 
