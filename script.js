@@ -51,8 +51,52 @@
     } catch { return false; }
   }
 
+  // ===== Shared helpers (deduped) =====
+  function makeTabData(id, opts) {
+    return Object.assign({
+      id: id,
+      url: '',
+      title: 'New Tab',
+      isActive: false,
+      isLoading: false,
+      history: [],
+      historyIndex: -1,
+      muted: false,
+      pinned: false,
+      contentCache: {}
+    }, opts || {});
+  }
+  function pushTabHistory(tab, url) {
+    if (tab.history[tab.historyIndex] === url) return; // already current entry
+    tab.history = tab.history.slice(0, tab.historyIndex + 1).concat([url]);
+    tab.historyIndex = tab.history.length - 1;
+  }
+  function faviconFor(domain) {
+    return 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(domain) + '&sz=16';
+  }
+  function createFaviconEl(domain, cls) {
+    const img = document.createElement('img');
+    if (cls) img.className = cls;
+    img.src = faviconFor(domain);
+    img.onerror = function () { img.style.display = 'none'; };
+    return img;
+  }
+  function createContentIframe(pageUrl, html, muted) {
+    const iframe = document.createElement('iframe');
+    iframe.className = 'content-iframe';
+    iframe.setAttribute('data-peakx-url', pageUrl);
+    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups' + (muted ? '' : ' allow-autoplay'));
+    iframe.srcdoc = html;
+    return iframe;
+  }
+  function setDotStatus(dotEl, textEl) {
+    if (!dotEl || !textEl) return;
+    dotEl.className = 'status-dot' + (tunnelStatus === 'connected' ? '' : tunnelStatus === 'connecting' ? ' connecting' : ' disconnected');
+    textEl.textContent = `WISP: ${tunnelProxy}`;
+  }
+
   // ===== State =====
-  let tabs = [{ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false, contentCache: {} }];
+  let tabs = [makeTabData(genId(), { isActive: true })];
   let favorites = JSON.parse(localStorage.getItem('peakx_favorites') || '[]');
   let tunnelStatus = 'connecting';
   let tunnelProxy = '...';
@@ -145,59 +189,49 @@
   // ===== Test WISP Connection Function =====
   async function testWISPConnection() {
     console.log('🧪 Testing WISP connection...');
-    
-    const statusText = document.getElementById('statusText');
-    const homeText = document.getElementById('statusText');
-    
+
+    function setTestStatus(text, color) {
+      ['statusText', 'statusText2'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) { el.textContent = text; el.style.color = color; }
+      });
+    }
+
     // Update status to show testing
-    if (statusText) {
-      statusText.textContent = 'WISP: Testing connection...';
-      statusText.style.color = '#f59e0b';
-    }
-    if (homeText) {
-      homeText.textContent = 'WISP: Testing connection...';
-      homeText.style.color = '#f59e0b';
-    }
-    
+    setTestStatus('WISP: Testing connection...', '#f59e0b');
+
     if (!libcurlReady) {
       const error = 'libcurl.js not initialized';
       console.error('❌', error);
-      if (statusText) {
-        statusText.textContent = 'WISP: ' + error;
-        statusText.style.color = '#ef4444';
-      }
-      if (homeText) {
-        homeText.textContent = 'WISP: ' + error;
-        homeText.style.color = '#ef4444';
-      }
+      setTestStatus('WISP: ' + error, '#ef4444');
       return { success: false, error };
     }
-    
+
     const results = [];
-    
+
     // Test each server
     for (let i = 0; i < WISP_SERVERS.length; i++) {
       const server = WISP_SERVERS[i];
       try {
         console.log(`🧪 Testing server ${i + 1}/${WISP_SERVERS.length}: ${server}`);
-        
+
         libcurl.set_websocket(server);
-        
+
         const startTime = Date.now();
-        
+
         // Create timeout promise
-        const timeoutPromise = new Promise((_, reject) => 
+        const timeoutPromise = new Promise((_, reject) =>
           setTimeout(() => reject(new Error('Connection timeout after 10 seconds')), 10000)
         );
-        
+
         // Race between fetch and timeout
         const testResponse = await Promise.race([
           libcurl.fetch('https://example.com', { method: 'HEAD' }),
           timeoutPromise
         ]);
-        
+
         const latency = Date.now() - startTime;
-        
+
         if (testResponse.ok) {
           results.push({ server, status: 'success', latency, message: `Connected in ${latency}ms` });
           console.log(`✅ Server ${server} connected successfully (${latency}ms)`);
@@ -210,43 +244,25 @@
         results.push({ server, status: 'failed', latency: 0, message: errorMessage });
         console.warn(`❌ Server ${server} failed:`, errorMessage);
       }
-      
+
       // Small delay between tests
       await new Promise(resolve => setTimeout(resolve, 500));
     }
-    
+
     // Find working server
     const workingServer = results.find(r => r.status === 'success');
-    
+
     if (workingServer) {
       WISP_SERVER = workingServer.server;
       tunnelStatus = 'connected';
       tunnelProxy = `WISP (${workingServer.latency}ms)`;
-      
-      if (statusText) {
-        statusText.textContent = `WISP: Connected via ${workingServer.server.split('/')[2]} (${workingServer.latency}ms)`;
-        statusText.style.color = '#22c55e';
-      }
-      if (homeText) {
-        homeText.textContent = `WISP: Connected via ${workingServer.server.split('/')[2]} (${workingServer.latency}ms)`;
-        homeText.style.color = '#22c55e';
-      }
-      
+      setTestStatus(`WISP: Connected via ${workingServer.server.split('/')[2]} (${workingServer.latency}ms)`, '#22c55e');
       console.log('✅ WISP connection test completed. Best server:', workingServer.server);
       return { success: true, results, bestServer: workingServer };
     } else {
       tunnelStatus = 'disconnected';
       tunnelProxy = 'WISP (all servers failed)';
-      
-      if (statusText) {
-        statusText.textContent = 'WISP: All servers failed';
-        statusText.style.color = '#ef4444';
-      }
-      if (homeText) {
-        homeText.textContent = 'WISP: All servers failed';
-        homeText.style.color = '#ef4444';
-      }
-      
+      setTestStatus('WISP: All servers failed', '#ef4444');
       console.error('❌ All WISP servers failed connection test');
       return { success: false, results, error: 'All servers failed' };
     }
@@ -286,6 +302,16 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
         storeCookies(Array.isArray(sc) ? sc : (sc ? [sc] : null), new URL(url).hostname);
       } catch (e) {}
       
+      if (response.status === 404) {
+        // Site answered but the page/link does not exist -> NOT a WISP failure.
+        // Throw immediately: no server rotation, no retries (the tunnel is fine).
+        const err404 = new Error('The page you are looking for could not be found (Error 404)');
+        err404.status = 404;
+        err404.is404 = true;
+        err404.server = 'Site responded';
+        throw err404;
+      }
+
       if (!response.ok) {
         const error = new Error(`HTTP ${response.status}: ${response.statusText}`);
         error.status = response.status;
@@ -306,6 +332,16 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       if (!content.includes('<html') && !content.includes('<!DOCTYPE')) {
         console.warn('⚠️ Content may not be HTML, length:', content.length);
       }
+
+      // Some hosts serve a "domain not found / parking" page with HTTP 200.
+      // Treat those as an invalid link so the user gets the correct message.
+      if (/domain[- ]?not[- ]?found|could not find this domain|domain is parked|buy this domain|this domain (?:is|may be) for sale/i.test(content.slice(0, 5000))) {
+        const errDnf = new Error('This domain does not appear to exist');
+        errDnf.status = 404;
+        errDnf.is404 = true;
+        errDnf.server = 'Site responded';
+        throw errDnf;
+      }
       
       // Update active server if successful
       WISP_SERVER = currentServer;
@@ -317,11 +353,17 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       const errorDetails = `Server: ${currentServer} | Error: ${errorMessage}`;
       console.error(`❌ WISP fetch failed (attempt ${retryCount + 1}, server ${currentServer}):`, errorMessage);
       
-      // Add server info to error for better debugging
-      error.server = currentServer;
+      // Add server info to error for better debugging (keep 'Site responded' for 404s)
+      if (!error.is404) error.server = currentServer;
       error.serverIndex = serverIndex;
       error.details = errorDetails;
       
+      // A 404 means the site responded and the tunnel works -> do NOT rotate
+      // servers or retry; surface the error to navigateTo() directly.
+      if (error.is404) {
+        throw error;
+      }
+
       // Try next server if available
       if (serverIndex < WISP_SERVERS.length - 1) {
         console.log(`🔄 Trying next WISP server (${serverIndex + 1}/${WISP_SERVERS.length - 1})...`);
@@ -853,7 +895,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
         if (tab.url && !tab.isLoading) {
           try {
             const hostname = new URL(tab.url).hostname;
-            faviconHtml = '<img src="https://www.google.com/s2/favicons?domain=' + hostname + '&sz=16" style="width:16px;height:16px;border-radius:2px;margin-right:6px;" onerror="this.style.display=\'none\'" />';
+            faviconHtml = '<img src="' + faviconFor(hostname) + '" style="width:16px;height:16px;border-radius:2px;margin-right:6px;" onerror="this.style.display=\'none\'" />';
           } catch(e) {}
         }
         
@@ -909,7 +951,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
 
   function addNewTab() {
     tabs.forEach(t => t.isActive = false);
-    tabs.push({ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false, contentCache: {} });
+    tabs.push(makeTabData(genId(), { isActive: true }));
     renderTabs();
     
     // Clear content area when creating new tab
@@ -925,7 +967,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     tabs = tabs.filter(t => t.id !== id);
     
     if (tabs.length === 0) {
-      tabs.push({ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false, contentCache: {} });
+      tabs.push(makeTabData(genId(), { isActive: true }));
       renderTabs();
       showHome();
     } else if (wasActive) {
@@ -971,13 +1013,8 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
         // nothing to do: live DOM restored as-is
       } else if (active.contentCache && active.contentCache[active.url]) {
         const cached = active.contentCache[active.url];
-        const iframe = document.createElement('iframe');
-        iframe.className = 'content-iframe';
-        iframe.setAttribute('data-peakx-url', active.url);
-        iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups' + (active.muted ? '' : ' allow-autoplay'));
-        iframe.srcdoc = cached.html;
         contentArea.innerHTML = '';
-        contentArea.appendChild(iframe);
+        contentArea.appendChild(createContentIframe(active.url, cached.html, active.muted));
       } else {
         // No cache for this tab yet -> load it
         navigateTo(active.url, active.id);
@@ -1046,10 +1083,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
         tab.url = normalized;
         tab.title = cached.title || getPageTitle(normalized);
         const idxL = tab.history.indexOf(normalized);
-        if (idxL >= 0) { tab.historyIndex = idxL; } else {
-          tab.history = tab.history.slice(0, tab.historyIndex + 1).concat([normalized]);
-          tab.historyIndex = tab.history.length - 1;
-        }
+        if (idxL >= 0) { tab.historyIndex = idxL; } else { pushTabHistory(tab, normalized); }
         renderTabs();
         showBrowser();
         document.getElementById('navUrl').value = normalized;
@@ -1061,10 +1095,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       tab.url = normalized;
       tab.title = cached.title || getPageTitle(normalized);
       const idx = tab.history.indexOf(normalized);
-      if (idx >= 0) { tab.historyIndex = idx; } else {
-        tab.history = tab.history.slice(0, tab.historyIndex + 1).concat([normalized]);
-        tab.historyIndex = tab.history.length - 1;
-      }
+      if (idx >= 0) { tab.historyIndex = idx; } else { pushTabHistory(tab, normalized); }
       renderTabs();
       showBrowser();
       document.getElementById('navUrl').value = normalized;
@@ -1072,21 +1103,15 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       document.getElementById('currentUrl').textContent = normalized;
       updateNavButtons();
       const contentArea = document.getElementById('contentArea');
-      const iframe = document.createElement('iframe');
-      iframe.className = 'content-iframe';
-      iframe.setAttribute('data-peakx-url', normalized);
-      iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups' + (tab.muted ? '' : ' allow-autoplay'));
-      iframe.srcdoc = cached.html;
       contentArea.innerHTML = '';
-      contentArea.appendChild(iframe);
+      contentArea.appendChild(createContentIframe(normalized, cached.html, tab.muted));
       return;
     }
 
     // Close AI chat when navigating
     closeAIChat();
 
-    const newHistory = tab.history.slice(0, tab.historyIndex + 1).concat([normalized]);
-    tab.url = normalized;
+    pushTabHistory(tab, normalized);
     tab.title = getPageTitle(normalized);
     tab.isLoading = true;
     tab.history = newHistory;
@@ -1147,11 +1172,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       tab.contentCache[normalized] = { html: content, title: tab.title };
 
       // Create iframe with srcdoc
-      const iframe = document.createElement('iframe');
-      iframe.className = 'content-iframe';
-      iframe.setAttribute('data-peakx-url', normalized);
-      iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups' + (tab.muted ? '' : ' allow-autoplay'));
-      iframe.srcdoc = content;
+      const iframe = createContentIframe(normalized, content, tab.muted);
       
       // Wait for iframe to load
       const loadPromise = new Promise((resolve, reject) => {
@@ -1177,7 +1198,8 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       
       // Save to history
       const history = JSON.parse(localStorage.getItem('peakx_history') || '[]');
-      history.unshift({ title: tab.title, url: normalized, timestamp: Date.now() });
+      let hostName = ''; try { hostName = new URL(normalized).hostname; } catch (e) {}
+      history.unshift({ title: tab.title, url: normalized, hostname: hostName, timestamp: Date.now() });
       localStorage.setItem('peakx_history', JSON.stringify(history.slice(0, 100)));
       
       console.log('✅ Page loaded successfully');
@@ -1194,27 +1216,46 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       const errorServer = error.server || 'Unknown server';
       const errorDetails = error.details || '';
       
-      // Show detailed error
-      contentArea.innerHTML = `
-        <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:40px;text-align:center;">
-          <h1 style="font-size:48px;margin:0 0 16px;">⚠️</h1>
-          <p style="color:#fff;font-size:18px;font-weight:600;">Failed to load page</p>
-          <p style="color:#ef4444;margin:8px 0;font-size:14px;">${errorMessage}</p>
-          ${errorDetails ? `<p style="color:#f59e0b;margin:8px 0;font-size:12px;padding:8px;background:#1a1a1a;border-radius:6px;">${errorDetails}</p>` : ''}
-          <p style="color:#444;font-size:12px;margin-top:16px;padding:12px;background:#111;border-radius:8px;word-break:break-all;max-width:400px;">${normalized}</p>
-          <p style="color:#555;font-size:12px;margin-top:12px;">WISP server may be down. Check your connection and try again.</p>
-          <div style="display:flex;gap:10px;margin-top:20px;">
-            <button onclick="navigateTo('${normalized}')" style="padding:10px 20px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">Retry</button>
+      const is404 = !!error.is404 || error.status === 404;
+
+      if (is404) {
+        // Invalid / non-existent link. The site answered, so the WISP tunnel is FINE.
+        // Do NOT mark the tunnel as disconnected or rotate servers on a 404.
+        contentArea.innerHTML = `
+          <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:40px;text-align:center;">
+            <h1 style="font-size:48px;margin:0 0 16px;">🔍</h1>
+            <p style="color:#ef4444;font-size:26px;font-weight:700;margin:0 0 8px;">Error 404 - Invalid link or does not exist</p>
+            <p style="color:#fff;font-size:15px;margin:8px 0;">Please write the link correctly or make sure it exists.</p>
+            <p style="color:#444;font-size:12px;margin-top:16px;padding:12px;background:#111;border-radius:8px;word-break:break-all;max-width:400px;">${normalized}</p>
+            <div style="display:flex;gap:10px;margin-top:20px;">
+              <button onclick="navigateTo('${normalized}')" style="padding:10px 20px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">Retry</button>
+            </div>
           </div>
-        </div>
-      `;
-      
-      // Update status to show connection issue
-      tunnelStatus = 'disconnected';
-      tunnelProxy = `WISP Error (${errorServer})`;
-      updateStatus();
-      
-      console.warn('⚠️ Page load failed - WISP connection issue');
+        `;
+        console.warn('\u26a0\ufe0f Page not found (404). Tunnel kept intact:', normalized);
+      } else {
+        // Show detailed error
+        contentArea.innerHTML = `
+          <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:40px;text-align:center;">
+            <h1 style="font-size:48px;margin:0 0 16px;">\u26a0\ufe0f</h1>
+            <p style="color:#fff;font-size:18px;font-weight:600;">Failed to load page</p>
+            <p style="color:#ef4444;margin:8px 0;font-size:14px;">${errorMessage}</p>
+            ${errorDetails ? `<p style="color:#f59e0b;margin:8px 0;font-size:12px;padding:8px;background:#1a1a1a;border-radius:6px;">${errorDetails}</p>` : ''}
+            <p style="color:#444;font-size:12px;margin-top:16px;padding:12px;background:#111;border-radius:8px;word-break:break-all;max-width:400px;">${normalized}</p>
+            <p style="color:#555;font-size:12px;margin-top:12px;">WISP server may be down. Check your connection and try again.</p>
+            <div style="display:flex;gap:10px;margin-top:20px;">
+              <button onclick="navigateTo('${normalized}')" style="padding:10px 20px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">Retry</button>
+            </div>
+          </div>
+        `;
+
+        // Update status to show connection issue
+        tunnelStatus = 'disconnected';
+        tunnelProxy = `WISP Error (${errorServer})`;
+        updateStatus();
+
+        console.warn('\u26a0\ufe0f Page load failed - WISP connection issue');
+      }
     }
   }
 
@@ -1235,20 +1276,9 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
   }
 
   function updateStatus() {
-    const dot = document.getElementById('statusDot2');
-    const text = document.getElementById('statusText2');
-    dot.className = 'status-dot' + (tunnelStatus === 'connected' ? '' : tunnelStatus === 'connecting' ? ' connecting' : ' disconnected');
-    
-    // Show appropriate label based on proxy type
-    const proxyLabel = 'WISP';
-    text.textContent = `${proxyLabel}: ${tunnelProxy}`;
-    
-    const homeDot = document.getElementById('statusDot');
-    const homeText = document.getElementById('statusText');
-    if (homeDot && homeText) {
-      homeDot.className = 'status-dot' + (tunnelStatus === 'connected' ? '' : tunnelStatus === 'connecting' ? ' connecting' : ' disconnected');
-      homeText.textContent = `${proxyLabel}: ${tunnelProxy}`;
-    }
+    // Browser view status bar + home screen status bar
+    setDotStatus(document.getElementById('statusDot2'), document.getElementById('statusText2'));
+    setDotStatus(document.getElementById('statusDot'), document.getElementById('statusText'));
   }
 
   // ===== History Popup =====
@@ -1265,7 +1295,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
         const div = document.createElement('div');
         div.className = 'history-item';
         const time = new Date(item.timestamp).toLocaleString();
-        div.innerHTML = '<img src="https://www.google.com/s2/favicons?domain=' + item.url + '&sz=16" onerror="this.style.display=\'none\'" /><div class="history-item-content"><div class="history-item-url">' + item.url + '</div><div class="history-item-meta"><span>' + time + '</span></div></div>';
+        div.innerHTML = '<img src="' + faviconFor(item.hostname || item.url) + '" onerror="this.style.display=\'none\'" /><div class="history-item-content"><div class="history-item-url">' + item.url + '</div><div class="history-item-meta"><span>' + time + '</span></div></div>';
         div.addEventListener('click', () => {
           navigateTo(item.url);
           popup.classList.remove('active');
@@ -1363,29 +1393,22 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     if (url) navigateTo(url);
   });
 
-  document.getElementById('backBtn').addEventListener('click', () => {
+  function stepHistory(delta) {
     const tab = getActiveTab();
-    if (tab.historyIndex > 0) {
-      tab.historyIndex--;
-      const url = tab.history[tab.historyIndex];
-      tab.url = url;
-      tab.title = getPageTitle(url);
-      renderTabs();
-      navigateTo(url, tab.id);
-    }
-  });
+    const next = tab.historyIndex + delta;
+    if (next < 0 || next >= tab.history.length) return;
+    // Drop the forward branch so navigating from here doesn't duplicate entries
+    tab.historyIndex = next;
+    tab.history = tab.history.slice(0, next + 1);
+    const url = tab.history[next];
+    tab.url = url;
+    tab.title = getPageTitle(url);
+    renderTabs();
+    navigateTo(url, tab.id);
+  }
 
-  document.getElementById('forwardBtn').addEventListener('click', () => {
-    const tab = getActiveTab();
-    if (tab.historyIndex < tab.history.length - 1) {
-      tab.historyIndex++;
-      const url = tab.history[tab.historyIndex];
-      tab.url = url;
-      tab.title = getPageTitle(url);
-      renderTabs();
-      navigateTo(url, tab.id);
-    }
-  });
+  document.getElementById('backBtn').addEventListener('click', () => stepHistory(-1));
+  document.getElementById('forwardBtn').addEventListener('click', () => stepHistory(1));
 
   document.getElementById('homeBackBtn').addEventListener('click', () => {
     document.getElementById('backBtn').click();
@@ -1406,7 +1429,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
 
   document.getElementById('homeBtn').addEventListener('click', () => {
     tabs.forEach(t => t.isActive = false);
-    tabs.push({ id: genId(), url: '', title: 'New Tab', isActive: true, isLoading: false, history: [], historyIndex: -1, muted: false, pinned: false, contentCache: {} });
+    tabs.push(makeTabData(genId(), { isActive: true }));
     renderTabs();
     showHome();
   });
@@ -1475,7 +1498,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     if (tab.url) {
       try {
         const hostname = new URL(tab.url).hostname;
-        favorites.push({ id: genId(), url: tab.url, title: tab.title, favicon: 'https://www.google.com/s2/favicons?domain=' + hostname + '&sz=32' });
+        favorites.push({ id: genId(), url: tab.url, title: tab.title, favicon: 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(hostname) + '&sz=32' });
         saveFavorites();
         renderFavorites();
       } catch {}
@@ -1502,7 +1525,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       const normalized = normalizeUrl(url);
       try {
         const hostname = new URL(normalized).hostname;
-        favorites.push({ id: genId(), url: normalized, title: title || getPageTitle(normalized), favicon: 'https://www.google.com/s2/favicons?domain=' + hostname + '&sz=32' });
+        favorites.push({ id: genId(), url: normalized, title: title || getPageTitle(normalized), favicon: 'https://www.google.com/s2/favicons?domain=' + encodeURIComponent(hostname) + '&sz=32' });
       } catch {
         favorites.push({ id: genId(), url: normalized, title: title || normalized });
       }
@@ -1650,18 +1673,16 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
         console.log('🧪 WISP test result:', testResult);
         if (testResult.success) {
           console.log('✅ PEAKX ready with libcurl.js + WISP');
-      } else {
-        alert(`❌ WISP Connection failed!\n\nAll servers failed to connect.\n\nTry:\n1. Check your internet connection\n2. Add different WISP servers\n3. Check if any servers are temporarily down\n\nResults:\n${result.results.map(r => `${r.server.split('/')[2]}: ${r.message}`).join('\n')}`);
-        tunnelStatus = 'disconnected';
-        tunnelProxy = 'WISP unavailable';
-        updateStatus();
-      }
+        } else {
+          // Non-blocking: status bar reflects the failure; navigation shows its own error UI.
+          console.error('❌ All WISP servers failed to connect:',
+            testResult.results.map(r => `${r.server.split('/')[2]}: ${r.message}`).join('; '));
+          tunnelStatus = 'disconnected';
+          tunnelProxy = 'WISP unavailable';
+          updateStatus();
+        }
       });
     } else {
-      console.warn('⚠️ libcurl initialization returned false - WISP unavailable');
-      tunnelStatus = 'disconnected';
-      tunnelProxy = 'WISP unavailable';
-      updateStatus();
       console.warn('⚠️ libcurl initialization returned false - WISP unavailable');
       tunnelStatus = 'disconnected';
       tunnelProxy = 'WISP unavailable';
