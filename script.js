@@ -65,9 +65,14 @@
   function genId() { return Date.now().toString(36) + Math.random().toString(36).slice(2); }
   function getPageTitle(url) { try { return new URL(url).hostname.replace('www.', ''); } catch { return url; } }
   function normalizeUrl(input) {
-    let url = input.trim();
+    let url = (input || '').trim();
+    // Bare IP address (e.g. "104.18.34.148" or "104.18.34.148/path") -> treat as host, not search
+    if (/^\d{1,3}(\.\d{1,3}){3}(:\d+)?(\/|$)/.test(url)) return 'https://' + url;
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      if (!url.includes('.') || url.includes(' ')) return 'https://www.google.com/search?q=' + encodeURIComponent(url);
+      // If it looks like a hostname (no spaces, first label has no dots/protocol junk), keep it
+      const firstToken = url.split(/[/?#]/)[0];
+      const looksLikeHost = !url.includes(' ') && /^[a-zA-Z0-9][a-zA-Z0-9.-]*$/.test(firstToken) && firstToken.includes('.');
+      if (!looksLikeHost) return 'https://www.google.com/search?q=' + encodeURIComponent(url);
       url = 'https://' + url;
     }
     return url;
@@ -260,16 +265,26 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       // Ensure we're using the correct server
       libcurl.set_websocket(currentServer);
       
-      const response = await libcurl.fetch(url, {
-        method: 'GET',
-        headers: {
+      const reqHeaders = {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
           'Accept-Language': 'en-US,en;q=0.5',
           'Accept-Encoding': 'gzip, deflate, br',
           'Cache-Control': 'no-cache'
-        }
+      };
+      try {
+        const ck = cookieHeaderFor(new URL(url).hostname);
+        if (ck) reqHeaders['Cookie'] = ck;
+      } catch (e) {}
+      const response = await libcurl.fetch(url, {
+        method: 'GET',
+        headers: reqHeaders
       });
+      try {
+        const h = response.headers || {};
+        const sc = (h.get && h.get('set-cookie')) || h['set-cookie'] || h['Set-Cookie'];
+        storeCookies(Array.isArray(sc) ? sc : (sc ? [sc] : null), new URL(url).hostname);
+      } catch (e) {}
       
       if (!response.ok) {
         const error = new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -340,7 +355,9 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     const promise = (async () => {
       if (!libcurlReady) throw new Error('libcurl not ready');
       libcurl.set_websocket(WISP_SERVER);
-      const resp = await libcurl.fetch(absUrl);
+      const resHeaders = { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' };
+      try { const ck = cookieHeaderFor(new URL(absUrl).hostname); if (ck) resHeaders['Cookie'] = ck; } catch (e) {}
+      const resp = await libcurl.fetch(absUrl, { headers: resHeaders });
       const ct = (resp.headers && (resp.headers['content-type'] || resp.headers['Content-Type'])) || '';
       let content;
       if (/text|json|xml|javascript|css|html|svg/i.test(ct) || !ct) {
@@ -353,11 +370,29 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
         for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
         content = 'data:' + (ct || 'application/octet-stream') + ';base64,' + btoa(bin);
       }
-      return { content, contentType: ct };
+      return { content, contentType: ct, status: resp.status, setCookies: resp.headersSet ? resp.headersSet.get('set-cookie') : (resp.headers['set-cookie'] ? [resp.headers['set-cookie']] : null) };
     })();
     resourceCache.set(absUrl, promise);
     promise.catch(() => resourceCache.delete(absUrl)); // don't cache failures
     return promise;
+  }
+
+  // ===== Cookie jar (per host) so logins/sessions survive across page+asset requests =====
+  const cookieJar = {}; // hostname -> { name: value }
+  function storeCookies(setCookieHeaders, host) {
+    if (!setCookieHeaders || !setCookieHeaders.length) return;
+    const jar = cookieJar[host] = cookieJar[host] || {};
+    setCookieHeaders.forEach(sc => {
+      const pair = String(sc).split(';')[0];
+      const eq = pair.indexOf('=');
+      if (eq > 0) jar[pair.slice(0, eq).trim()] = pair.slice(eq + 1).trim();
+    });
+  }
+  function cookieHeaderFor(host) {
+    const jar = cookieJar[host];
+    if (!jar) return null;
+    const s = Object.entries(jar).map(([k, v]) => k + '=' + v).join('; ');
+    return s || null;
   }
 
   // ===== URL Rewriter =====
@@ -433,12 +468,13 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
         });
       });
 
-      // Inline <style> blocks and style attr url(): fetch via runtime at load time is hard in CSS,
-      // so we resolve them to absolute URLs and let the browser fetch them directly (best effort),
-      // while same-origin-critical assets were already proxied above.
-      html = html.replace(/url\(["']?([^"')]+)["']?\)/gi, (match, url) => {
-        if (/^(data:|#)/i.test(url)) return match;
-        try { return `url("${new URL(url, base).href}")`; } catch { return match; }
+      // Inline <style> blocks and style attr url(): replace with a placeholder token that the
+      // runtime resolves to a blob: object URL fetched through WISP (fixes broken backgrounds/icons).
+      html = html.replace(/url\((['"])([^'"]+)\1\)|url\(([^)]*)\)/gi, (match, q1, uq, unq) => {
+        const url = (uq !== undefined ? uq : unq || '').trim();
+        if (!url || /^(data:|about:|javascript:|#)/i.test(url)) return match;
+        let abs; try { abs = new URL(url, base).href; } catch { return match; }
+        return 'url("___PEAKXURL___' + abs.replace(/["')\\]/g, encodeURIComponent) + '___")';
       });
 
       return html;
@@ -477,11 +513,35 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
           window.addEventListener('message', (e) => {
             const d = e.data;
             if (!d || !d.__peakxResp) return;
+            if (typeof d.id === 'string' && d.id[0] === 'u' && pendingObjReqs[d.id]) {
+              const p = pendingObjReqs[d.id];
+              delete pendingObjReqs[d.id];
+              p(d.ok && d.objUrl ? d.objUrl : null);
+              return;
+            }
             const p = pendingReqs[d.id];
             if (!p) return;
             delete pendingReqs[d.id];
             if (d.ok) p.resolve(d); else p.reject(new Error(d.error || 'WISP fetch failed'));
           });
+
+          // Object-URL request (for CSS url() values): returns a Promise<blobUrl|originalUrl>
+          let objReqId = 0;
+          const pendingObjReqs = {};
+          function wispObjUrl(url) {
+            return new Promise((resolveP) => {
+              const id = 'u' + (++objReqId);
+              pendingObjReqs[id] = resolveP;
+              notifyParent({ type: 'peakx-url', id: id, url: url });
+              setTimeout(() => { if (pendingObjReqs[id]) { delete pendingObjReqs[id]; resolveP(url); } }, 20000);
+            });
+          }
+          window.__PEAKX_URL_OBJ__ = wispObjUrl;
+          window.__PEAKX_URL__ = function(u) {
+            // Synchronous contexts (JS-assigned URLs): kick off async swap on next element style use.
+            // Returns the absolute URL directly; elements are handled by processNode/observers instead.
+            return u;
+          };
 
           async function loadScript(el) {
             const src = el.getAttribute('data-peakx-src');
@@ -505,10 +565,11 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
               try {
                 const r = await wispFetch(href);
                 let css = r.content;
-                // rewrite CSS url(...) references to absolute (browser fetches them directly; best effort)
+                // Rewrite CSS url(...) references through the WISP loader (fixes missing backgrounds/icons/fonts)
                 css = css.replace(/url\\((["']?)([^"')]+)\\1\\)/gi, (m, q, u) => {
-                  if (/^(data:|#)/i.test(u)) return m;
-                  return 'url("' + resolve(u) + '")';
+                  if (/^(data:|#|about:|javascript:)/i.test(u)) return m;
+                  let abs; try { abs = new URL(u, href).href; } catch { return m; }
+                  return 'url("' + window.__PEAKX_URL__(abs) + '")';
                 });
                 const st = document.createElement('style');
                 st.textContent = css;
@@ -560,13 +621,42 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
 
           const observer = new MutationObserver((muts) => {
             muts.forEach(m => {
-              m.addedNodes.forEach(n => { processNode(n); if (n.querySelectorAll) n.querySelectorAll('[data-peakx-src],[data-peakx-href]').forEach(processNode); });
+              m.addedNodes.forEach(n => {
+                processNode(n);
+                if (n.querySelectorAll) n.querySelectorAll('[data-peakx-src],[data-peakx-href]').forEach(processNode);
+                if (n.nodeType === 1) {
+                  if ((n.getAttribute && n.getAttribute('style') || '').includes('___PEAKXURL___')) resolveStyleTokens(n);
+                  if (n.tagName === 'STYLE' && (n.textContent || '').includes('___PEAKXURL___')) {
+                    replaceCssTokens(n.textContent, PAGE_URL).then(out => { n.textContent = out; });
+                  }
+                }
+              });
             });
           });
 
           function boot() {
             observer.observe(document.documentElement, { childList: true, subtree: true });
             document.querySelectorAll('script[data-peakx-src],link[data-peakx-href],img[data-peakx-src],[data-peakx-src]').forEach(processNode);
+            resolveStyleTokens(document.documentElement);
+            // Also fix url() tokens inside <style> blocks by replacing them with fetched blob URLs
+            document.querySelectorAll('style').forEach(async (st) => {
+              const t = st.textContent || '';
+              if (!t.includes('___PEAKXURL___')) return;
+              const out = await replaceCssTokens(t, PAGE_URL);
+              st.textContent = out;
+            });
+          }
+
+          async function replaceCssTokens(cssText, cssUrl) {
+            const matches = cssText.match(/url\("___PEAKXURL___[^_]*___"\)/g) || [];
+            let out = cssText;
+            for (const m of matches) {
+              const raw = m.slice(m.indexOf('___PEAKXURL___') + 14, m.lastIndexOf('___'));
+              let abs; try { abs = decodeURIComponent(raw); } catch { continue; }
+              const objUrl = await window.__PEAKX_URL_OBJ__(abs);
+              out = out.split(m).join('url("' + (objUrl || abs) + '")');
+            }
+            return out;
           }
           if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 
@@ -664,6 +754,26 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
             const c = meta.getAttribute('content') || '';
             const m = c.match(/url=(.*)$/i);
             if (m) { meta.remove(); notifyParent({ type: 'navigate', url: resolve(m[1].trim().replace(/^["']|["']$/g, '')) }); }
+          }
+
+          // ---- Resolve ___PEAKXURL___...___ tokens in inline styles: fetch via WISP -> blob URL ----
+          async function resolveStyleTokens(root) {
+            const nodes = [(root || document.documentElement)];
+            if (root && root.querySelectorAll) nodes.push(...root.querySelectorAll('[style*="___PEAKXURL___"]'));
+            for (const n of nodes) {
+              const st = n.getAttribute && n.getAttribute('style');
+              if (st && st.includes('___PEAKXURL___')) {
+                let out = st;
+                const matches = out.match(/___PEAKXURL___([^_]*)___/g) || [];
+                for (const m of matches) {
+                  const raw = m.slice('___PEAKXURL___'.length, -3);
+                  let abs; try { abs = decodeURIComponent(raw); } catch { continue; }
+                  const objUrl = await window.__PEAKX_URL_OBJ__(abs);
+                  out = out.replace(m, objUrl || abs);
+                }
+                n.setAttribute('style', out);
+              }
+            }
           }
 
           console.log('PEAKX Runtime injected for:', PAGE_URL);
@@ -854,21 +964,22 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       document.getElementById('currentUrl').textContent = active.url;
       updateNavButtons();
       
-      // If cached content exists for this tab's URL, restore it instantly (no refetch)
-      if (active.contentCache && active.contentCache[active.url]) {
+      // Keep the live iframe if it belongs to this tab (preserves session/scroll/state).
+      // Only recreate from cache if the current iframe is missing or belongs to another URL.
+      const existing = contentArea.querySelector('iframe');
+      if (existing && existing.getAttribute('data-peakx-url') === active.url) {
+        // nothing to do: live DOM restored as-is
+      } else if (active.contentCache && active.contentCache[active.url]) {
         const cached = active.contentCache[active.url];
-        const existing = contentArea.querySelector('iframe');
-        if (!existing || existing.getAttribute('data-peakx-url') !== active.url) {
-          const iframe = document.createElement('iframe');
-          iframe.className = 'content-iframe';
-          iframe.setAttribute('data-peakx-url', active.url);
-          iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups' + (active.muted ? '' : ' allow-autoplay'));
-          iframe.srcdoc = cached.html;
-          contentArea.innerHTML = '';
-          contentArea.appendChild(iframe);
-        }
-      } else if (active.url && !contentArea.querySelector('iframe')) {
-        // Need to load the page
+        const iframe = document.createElement('iframe');
+        iframe.className = 'content-iframe';
+        iframe.setAttribute('data-peakx-url', active.url);
+        iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups' + (active.muted ? '' : ' allow-autoplay'));
+        iframe.srcdoc = cached.html;
+        contentArea.innerHTML = '';
+        contentArea.appendChild(iframe);
+      } else {
+        // No cache for this tab yet -> load it
         navigateTo(active.url, active.id);
       }
     } else {
@@ -929,6 +1040,24 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     // Tab content cache: instant restore when revisiting a known URL
     if (tab.contentCache && tab.contentCache[normalized]) {
       const cached = tab.contentCache[normalized];
+      const live = document.getElementById('contentArea').querySelector('iframe');
+      if (live && live.getAttribute('data-peakx-url') === normalized) {
+        // Live iframe already showing this page in this tab: reuse it, no reload
+        tab.url = normalized;
+        tab.title = cached.title || getPageTitle(normalized);
+        const idxL = tab.history.indexOf(normalized);
+        if (idxL >= 0) { tab.historyIndex = idxL; } else {
+          tab.history = tab.history.slice(0, tab.historyIndex + 1).concat([normalized]);
+          tab.historyIndex = tab.history.length - 1;
+        }
+        renderTabs();
+        showBrowser();
+        document.getElementById('navUrl').value = normalized;
+        document.getElementById('homeNavInput').value = normalized;
+        document.getElementById('currentUrl').textContent = normalized;
+        updateNavButtons();
+        return;
+      }
       tab.url = normalized;
       tab.title = cached.title || getPageTitle(normalized);
       const idx = tab.history.indexOf(normalized);
@@ -1385,6 +1514,49 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     }
   });
 
+  // ===== Object-URL cache: turn WISP-fetched resources into blob URLs (for CSS url(), <link>, etc.) =====
+  const objUrlCache = new Map(); // absUrl -> Promise<blobUrl or null>
+  async function getObjUrl(absUrl) {
+    if (objUrlCache.has(absUrl)) return objUrlCache.get(absUrl);
+    const p = (async () => {
+      try {
+        const r = await fetchResourceViaWisp(absUrl);
+        let blob;
+        if (typeof r.content === 'string' && r.content.startsWith('data:')) {
+          const res = await fetch(r.content); // data URL decode (same-origin, safe)
+          blob = await res.blob();
+        } else if (typeof r.content === 'string') {
+          blob = new Blob([r.content], { type: r.contentType || 'text/plain' });
+        } else {
+          blob = r.content instanceof Blob ? r.content : new Blob([r.content]);
+        }
+        return URL.createObjectURL(blob);
+      } catch (e) {
+        console.warn('PEAKX: object URL failed for', absUrl, e.message);
+        return null;
+      }
+    })();
+    objUrlCache.set(absUrl, p);
+    p.then(v => { if (v === null) objUrlCache.delete(absUrl); });
+    return p;
+  }
+
+  async function handlePeakxUrl(event, d) {
+    const respond = (payload) => { try { event.source.postMessage({ __peakxResp: true, id: d.id, ...payload }, '*'); } catch (e) {} };
+    try {
+      const iframe = event.source && event.source.frameElement;
+      const pageUrl = iframe && iframe.getAttribute('data-peakx-url');
+      if (!pageUrl || !d.url) throw new Error('no context');
+      const abs = new URL(d.url, pageUrl).href;
+      if (isBlacklisted(abs)) throw new Error('blocked');
+      const objUrl = await getObjUrl(abs);
+      if (!objUrl) throw new Error('fetch failed');
+      respond({ ok: true, objUrl: objUrl });
+    } catch (err) {
+      respond({ ok: false, error: err.message });
+    }
+  }
+
   // ===== Bridge: answer sub-resource fetch requests coming from proxied iframes =====
   async function handlePeakxFetch(event, d) {
     const iframe = event.source && event.source.frameElement;
@@ -1395,6 +1567,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       const abs = new URL(d.url, pageUrl).href;
       if (isBlacklisted(abs)) throw new Error('blocked');
       const r = await fetchResourceViaWisp(abs);
+      try { storeCookies(r.setCookies, new URL(abs).hostname); } catch (e) {}
       if (typeof r.content === 'string') {
         respond({ ok: true, content: r.content, contentType: r.contentType, status: r.status || 200 });
       } else {
@@ -1432,6 +1605,8 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       }
     } else if (d.type === 'peakx-fetch' && d.id) {
       handlePeakxFetch(event, d);
+    } else if (d.type === 'peakx-url' && d.id) {
+      handlePeakxUrl(event, d);
     }
   });
 
