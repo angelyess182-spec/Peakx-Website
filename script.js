@@ -409,6 +409,20 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
         return `<link${pre}data-peakx-href="${t}" href="about:blank"${post}>`;
       });
 
+      // <link rel="preload"> for fonts/scripts/styles: convert to data-peakx-href so the
+      // runtime fetches them through WISP instead of failing cross-origin.
+      html = html.replace(/<link\b([^>]*?)\brel=["'](?:preload|modulepreload)["']([^>]*)>/gi, (match, pre, post) => {
+        const asMatch = (pre + post).match(/\bas=["'](\w+)["']/i);
+        const as = asMatch ? asMatch[1].toLowerCase() : '';
+        if (as === 'font' || as === 'script' || as === 'style') {
+          return match.replace(/\bhref=(["'])([^"']+)\1/i, (m2, q, u) => {
+            let t; try { t = new URL(u, base).href; } catch { return m2; }
+            return `data-peakx-preload="${as}" data-peakx-href=${q}${t}${q} href=""`;
+          });
+        }
+        return match;
+      });
+
       // <a href> / <form action>: keep absolute URLs (runtime intercepts clicks/submits)
       const navAttrs = ['href', 'action', 'poster', 'data-src', 'data-href'];
       navAttrs.forEach(attr => {
@@ -481,11 +495,13 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
             } catch (err) { console.warn('PEAKX: failed to load script', src, err); }
           }
 
+          let fontId = 0;
           async function loadLink(el) {
             const href = el.getAttribute('data-peakx-href');
             if (!href) return;
             const rel = (el.getAttribute('rel') || '').toLowerCase();
-            if (rel.includes('stylesheet')) {
+            const preloadAs = (el.getAttribute('data-peakx-preload') || '').toLowerCase();
+            if (rel.includes('stylesheet') || preloadAs === 'style' || preloadAs === 'script') {
               try {
                 const r = await wispFetch(href);
                 let css = r.content;
@@ -498,6 +514,14 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
                 st.textContent = css;
                 document.head.appendChild(st);
               } catch (err) { console.warn('PEAKX: failed to load stylesheet', href, err); }
+            } else if (preloadAs === 'font') {
+              try {
+                const r = await wispFetch(href);
+                const dataUrl = r.dataUrl || ('data:' + (r.contentType || 'font/woff2') + ';base64,' + r.base64);
+                const fs = new FontFace('peakx-font-' + (++fontId), 'url("' + dataUrl + '")');
+                await fs.load();
+                document.fonts.add(fs);
+              } catch (err) { console.warn('PEAKX: failed to load preloaded font', href, err); }
             } else if (rel.includes('icon')) {
               el.href = href; // favicons can load directly
             } else {
@@ -599,8 +623,12 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
           window.fetch = function(input, init) {
             try {
               const u = typeof input === 'string' ? input : (input && input.url) || String(input);
-              if (/^https?:/i.test(resolve(u)) && !resolve(u).startsWith(PAGE_URL.origin || '')) {
-                return wispFetch(resolve(u)).then(r => new Response(r.content, { status: r.status || 200, headers: { 'Content-Type': r.contentType || 'text/plain' } }));
+              const abs = resolve(u);
+              if (/^https?:/i.test(abs)) {
+                return wispFetch(abs).then(r => new Response(
+                (typeof r.content === 'string') ? r.content : (r.binaryBase64 ? Uint8Array.from(atob(r.binaryBase64), c => c.charCodeAt(0)) : ''),
+                { status: r.status || 200, headers: { 'Content-Type': r.contentType || 'text/plain' } }
+              )).catch(() => origFetch(input, init));
               }
             } catch (e) {}
             return origFetch(input, init);
@@ -917,6 +945,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       const contentArea = document.getElementById('contentArea');
       const iframe = document.createElement('iframe');
       iframe.className = 'content-iframe';
+      iframe.setAttribute('data-peakx-url', normalized);
       iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups' + (tab.muted ? '' : ' allow-autoplay'));
       iframe.srcdoc = cached.html;
       contentArea.innerHTML = '';
@@ -1367,9 +1396,19 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       if (isBlacklisted(abs)) throw new Error('blocked');
       const r = await fetchResourceViaWisp(abs);
       if (typeof r.content === 'string') {
-        respond({ ok: true, content: r.content, contentType: r.contentType, status: 200 });
+        respond({ ok: true, content: r.content, contentType: r.contentType, status: r.status || 200 });
       } else {
-        respond({ ok: true, dataUrl: r.content, contentType: r.contentType, status: 200 });
+        // Binary resource: pass raw bytes as base64 too (for fetch()/XHR consumers)
+        let b64 = '';
+        try {
+          const blob = r.content instanceof Blob ? r.content : null;
+          if (blob) {
+            const buf = new Uint8Array(await blob.arrayBuffer());
+            let bin = ''; for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
+            b64 = btoa(bin);
+          }
+        } catch (e) {}
+        respond({ ok: true, dataUrl: r.content, binaryBase64: b64, contentType: r.contentType, status: r.status || 200 });
       }
     } catch (err) {
       respond({ ok: false, error: err.message });
