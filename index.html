@@ -189,22 +189,23 @@
     .modal-btn-secondary { background: #1a1a1a; color: #888; }
     .modal-btn-secondary:hover { background: #222; color: #fff; }
     /* Animaciones para Tabs */
-.tab-item {
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  border-radius: 8px;
-  border: 1px solid transparent;
-  position: relative;
-  overflow: hidden;
+/* Animaciones para Tabs */
+.tab-item.active {
+  background-color: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 2px 8px rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(4px);
 }
 
 .tab-item:hover {
-  background-color: rgba(255, 255, 255, 0.08);
+  background-color: rgba(255, 255, 255, 0.04);
   transform: translateY(-1px);
-  border-color: rgba(255, 255, 255, 0.1);
+  transition: all 0.2s ease;
 }
 
-.tab-item:hover .tab-title {
-  color: #fff;
+.tab-item.active .tab-title {
+  color: #ffffff;
+  font-weight: 500;
 }
 
 .tab-item:hover img, 

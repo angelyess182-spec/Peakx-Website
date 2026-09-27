@@ -922,24 +922,26 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
         const item = document.createElement('div');
         item.className = 'tab-item' + (tab.isActive ? ' active' : '') + (tab.pinned ? ' pinned' : '');
         item.setAttribute('data-tab-id', tab.id);
+        // Tooltip con info real de la tab
+        const tooltipText = tab.url ? `${tab.title}\n${tab.url}` : 'New Tab';
+        item.setAttribute('data-tooltip', tooltipText);
         item.draggable = true;
         
         let faviconHtml = '';
-        if (tab.url && !tab.isLoading) {
+        const defaultIcon = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23888'%3E%3Cpath d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z'/%3E%3C/svg%3E";
+        
+        if (tab.isLoading) {
+          faviconHtml = `<div class="tab-spinner" style="width:16px;height:16px;border:2px solid #333;border-top-color:#6366f1;border-radius:50%;animation:spin 1s linear infinite;margin-right:6px;"></div>`;
+        } else if (tab.url && tab.url.startsWith('http')) {
           try {
             const hostname = new URL(tab.url).hostname;
-            faviconHtml = '<img src="' + faviconFor(hostname) + '" style="width:16px;height:16px;border-radius:2px;margin-right:6px;" onerror="this.style.display=\'none\'" />';
-          } catch(e) {}
-        }
-        
-        item.innerHTML = (tab.isLoading ? '<div class="spinner" style="margin-right:6px;"></div>' : faviconHtml) + '<span class="tab-title">' + tab.title + '</span><span class="tab-close" data-id="' + tab.id + '">×</span>';
-        
-        item.addEventListener('click', (e) => {
-          if (e.target.classList.contains('tab-close')) {
-            closeTab(tab.id);
-          } else {
-            switchTab(tab.id);
+            faviconHtml = `<img src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=32" style="width:16px;height:16px;border-radius:2px;margin-right:6px;pointer-events:none;background:#fff;" onerror="this.src='${defaultIcon}'" />`;
+          } catch(e) {
+            faviconHtml = `<img src="${defaultIcon}" style="width:16px;height:16px;margin-right:6px;opacity:0.7;" />`;
           }
+        } else {
+          faviconHtml = `<img src="${defaultIcon}" style="width:16px;height:16px;margin-right:6px;opacity:0.7;" />`;
+        }
         });
 
         item.addEventListener('contextmenu', (e) => {
@@ -1707,13 +1709,21 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
   }
   
   try {
-    loadTabs(); // Cargar tabs guardadas
+    loadTabs();
     loadBlacklist();
     createParticles();
     updateClock();
     setInterval(updateClock, 1000);
     renderFavorites();
     renderTabs();
+    
+    // FIX: Si la tab activa restaurada no tiene caché, recargarla automáticamente
+    const activeTab = getActiveTab();
+    if (activeTab && activeTab.url && (!activeTab.contentCache || !activeTab.contentCache[activeTab.url])) {
+      console.log('🔄 Restoring content for active tab:', activeTab.url);
+      navigateTo(activeTab.url, activeTab.id);
+    }
+    
     console.log('✅ UI initialized');
   } catch (error) {
     console.error('❌ UI initialization failed:', error);
