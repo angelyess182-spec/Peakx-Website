@@ -145,10 +145,24 @@
     
     if (typeof libcurl === 'undefined') {
       console.error('❌ libcurl.js failed to load after', maxAttempts, 'attempts');
-      // Show error message to user
       const statusText = document.getElementById('statusText');
       if (statusText) {
         statusText.textContent = 'WISP: Failed to load libcurl.js';
+        statusText.style.color = '#ef4444';
+      }
+      return false;
+    }
+    
+    // CRÍTICO: Cargar el módulo WebAssembly antes de hacer cualquier petición
+    console.log('✅ libcurl.js script loaded, now loading WASM...');
+    try {
+      await libcurl.load_wasm('https://cdn.jsdelivr.net/npm/libcurl.js@latest/dist/libcurl_full.wasm');
+      console.log('✅ WASM loaded successfully');
+    } catch (wasmErr) {
+      console.error('❌ Failed to load libcurl WASM:', wasmErr);
+      const statusText = document.getElementById('statusText');
+      if (statusText) {
+        statusText.textContent = 'WISP: WASM load failed';
         statusText.style.color = '#ef4444';
       }
       return false;
@@ -756,21 +770,18 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
               return originalOpen.apply(this, arguments);
             };
           } catch (e) { console.warn('PEAKX: location hook limited', e); }
-      } catch (e) { console.warn('PEAKX: location hook limited', e); }
 
-      // ---- History pushState / replaceState interception (Fixes SecurityError in about:srcdoc) ----
-      try {
-        const origPushState = window.history.pushState;
-        const origReplaceState = window.history.replaceState;
-        window.history.pushState = function(state, title, url) {
-          try { return origPushState.apply(this, arguments); } catch (e) { return null; }
-        };
-        window.history.replaceState = function(state, title, url) {
-          try { return origReplaceState.apply(this, arguments); } catch (e) { return null; }
-        };
-      } catch (e) { console.warn('PEAKX: history hook limited', e); }
-
-      // ---- fetch / XMLHttpRequest interception via WISP ----
+          // ---- History pushState / replaceState interception (Fixes SecurityError in about:srcdoc) ----
+          try {
+            const origPushState = window.history.pushState;
+            const origReplaceState = window.history.replaceState;
+            window.history.pushState = function(state, title, url) {
+              try { return origPushState.apply(this, arguments); } catch (e) { return null; }
+            };
+            window.history.replaceState = function(state, title, url) {
+              try { return origReplaceState.apply(this, arguments); } catch (e) { return null; }
+            };
+          } catch (e) { console.warn('PEAKX: history hook limited', e); }
 
           // ---- fetch / XMLHttpRequest interception via WISP ----
           const origFetch = window.fetch.bind(window);
