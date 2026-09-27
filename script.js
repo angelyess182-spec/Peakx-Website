@@ -605,6 +605,11 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
             if (!src) return;
             try {
               const r = await wispFetch(src);
+              // FIX: Evitar que páginas de error HTML (404) se inyecten como JS
+              if (!r.content || typeof r.content !== 'string' || r.content.trim().startsWith('<')) {
+                console.warn('PEAKX: Script fetch devolvió HTML (probablemente 404), omitiendo:', src);
+                return;
+              }
               const s = document.createElement('script');
               s.textContent = r.content;
               if (el.defer) s.defer = true;
@@ -1049,30 +1054,42 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
   function switchTab(id) {
     tabs.forEach(t => t.isActive = (t.id === id));
     renderTabs();
-    saveTabs(); // FIX: Guardar estado al cambiar de tab para recordar la activa
+    saveTabs();
     
     const active = getActiveTab();
+    const contentArea = document.getElementById('contentArea');
+    
+    // 1. Ocultar TODOS los iframes existentes (preserva scroll, JS y estado)
+    Array.from(contentArea.querySelectorAll('iframe')).forEach(iframe => {
+      iframe.style.display = 'none';
+    });
+
     if (active.url) {
       showBrowser();
-      const contentArea = document.getElementById('contentArea');
       document.getElementById('navUrl').value = active.url;
       document.getElementById('homeNavInput').value = active.url;
       document.getElementById('currentUrl').textContent = active.url;
       updateNavButtons();
       
-      const existing = contentArea.querySelector('iframe');
-      if (existing && existing.getAttribute('data-peakx-url') === active.url) {
-        // Live DOM restored as-is
+      // 2. Buscar si ya existe el iframe de esta tab específica
+      let targetIframe = contentArea.querySelector(`iframe[data-peakx-tab-id="${active.id}"]`);
+      
+      if (targetIframe) {
+        // Ya existe, solo mostrarlo
+        targetIframe.style.display = 'block';
       } else if (active.contentCache && active.contentCache[active.url]) {
+        // No está en el DOM, pero tenemos caché. Crearlo.
         const cached = active.contentCache[active.url];
-        contentArea.innerHTML = '';
-        contentArea.appendChild(createContentIframe(active.url, cached.html, active.muted));
+        targetIframe = createContentIframe(active.url, cached.html, active.muted);
+        targetIframe.setAttribute('data-peakx-tab-id', active.id);
+        contentArea.appendChild(targetIframe);
+        targetIframe.style.display = 'block';
       } else {
+        // No hay caché, necesitamos navegar
         navigateTo(active.url, active.id);
       }
     } else {
       showHome();
-      const contentArea = document.getElementById('contentArea');
       contentArea.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#333;background:#0a0a0a;"><p>Ready to browse</p></div>';
     }
   }
@@ -1109,63 +1126,48 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     if (!tab) return;
     const normalized = normalizeUrl(url);
 
-    // Blacklist check
     if (isBlacklisted(normalized)) {
       showBrowser();
       document.getElementById('loadingBar').classList.remove('active');
       const contentArea = document.getElementById('contentArea');
-      contentArea.innerHTML = `
-        <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:40px;text-align:center;">
-          <h1 style="font-size:48px;margin:0 0 16px;">🚫</h1>
-          <p style="color:#fff;font-size:18px;font-weight:600;">Site blocked by PeakX blacklist</p>
-          <p style="color:#555;font-size:12px;margin-top:12px;word-break:break-all;max-width:400px;">${normalized}</p>
-        </div>
-      `;
+      contentArea.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:40px;text-align:center;"><h1 style="font-size:48px;margin:0 0 16px;">🚫</h1><p style="color:#fff;font-size:18px;font-weight:600;">Site blocked by PeakX blacklist</p><p style="color:#555;font-size:12px;margin-top:12px;word-break:break-all;max-width:400px;">${normalized}</p></div>`;
       return;
     }
 
-    // Tab content cache: instant restore when revisiting a known URL
     if (tab.contentCache && tab.contentCache[normalized]) {
       const cached = tab.contentCache[normalized];
-      const live = document.getElementById('contentArea').querySelector('iframe');
-      if (live && live.getAttribute('data-peakx-url') === normalized) {
-        // Live iframe already showing this page in this tab: reuse it, no reload
-        tab.url = normalized;
-        tab.title = cached.title || getPageTitle(normalized);
-        const idxL = tab.history.indexOf(normalized);
-        if (idxL >= 0) { tab.historyIndex = idxL; } else { pushTabHistory(tab, normalized); }
-        renderTabs();
-        showBrowser();
-        document.getElementById('navUrl').value = normalized;
-        document.getElementById('homeNavInput').value = normalized;
-        document.getElementById('currentUrl').textContent = normalized;
-        updateNavButtons();
-        return;
+      const contentArea = document.getElementById('contentArea');
+      let targetIframe = contentArea.querySelector(`iframe[data-peakx-tab-id="${tab.id}"]`);
+      
+      if (!targetIframe) {
+        targetIframe = createContentIframe(normalized, cached.html, tab.muted);
+        targetIframe.setAttribute('data-peakx-tab-id', tab.id);
+        contentArea.appendChild(targetIframe);
+      } else {
+        targetIframe.srcdoc = cached.html;
+        targetIframe.setAttribute('data-peakx-url', normalized);
       }
+      
+      Array.from(contentArea.querySelectorAll('iframe')).forEach(iframe => { iframe.style.display = 'none'; });
+      targetIframe.style.display = 'block';
+      
       tab.url = normalized;
       tab.title = cached.title || getPageTitle(normalized);
-      const idx = tab.history.indexOf(normalized);
-      if (idx >= 0) { tab.historyIndex = idx; } else { pushTabHistory(tab, normalized); }
+      tab.historyIndex = tab.history.length - 1;
       renderTabs();
       showBrowser();
       document.getElementById('navUrl').value = normalized;
       document.getElementById('homeNavInput').value = normalized;
       document.getElementById('currentUrl').textContent = normalized;
       updateNavButtons();
-      const contentArea = document.getElementById('contentArea');
-      contentArea.innerHTML = '';
-      contentArea.appendChild(createContentIframe(normalized, cached.html, tab.muted));
       return;
     }
 
-    // Close AI chat when navigating
     closeAIChat();
-
-    pushTabHistory(tab, normalized);
+    tab.history = tab.history.slice(0, tab.historyIndex + 1).concat([normalized]);
+    tab.historyIndex = tab.history.length - 1;
     tab.title = getPageTitle(normalized);
     tab.isLoading = true;
-    // CORRECCIÓN: 'newHistory' no estaba definida, causando un ReferenceError que rompía el flujo silenciosamente
-    tab.historyIndex = tab.history.length - 1;
 
     renderTabs();
     showBrowser();
@@ -1175,109 +1177,63 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     document.getElementById('loadingBar').classList.add('active');
     updateNavButtons();
 
-    console.log('🌐 Navigating to:', normalized);
-
     const contentArea = document.getElementById('contentArea');
-    
-    // Show loading indicator
-    contentArea.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;">
-        <div style="width:40px;height:40px;border:3px solid #333;border-top-color:#6366f1;border-radius:50%;animation:spin 1s linear infinite;"></div>
-        <p style="margin-top:16px;color:#888;font-size:14px;">Loading ${normalized}...</p>
-      </div>
-    `;
+    contentArea.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;"><div style="width:40px;height:40px;border:3px solid #333;border-top-color:#6366f1;border-radius:50%;animation:spin 1s linear infinite;"></div><p style="margin-top:16px;color:#888;font-size:14px;">Loading ${normalized}...</p></div>`;
     
     try {
-      console.log('🔍 Iniciando navegación vía WISP para:', normalized);
-      
       const fetchPromise = fetchViaWisp(normalized);
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('WISP request timeout after 15 seconds')), 15000)
-      );
-
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('WISP request timeout after 15 seconds')), 15000));
       const result = await Promise.race([fetchPromise, timeoutPromise]);
-      console.log('✅ Conexión WISP exitosa, procesando respuesta...');
 
-      // 1. VALIDACIÓN ROBUSTA PARA EVITAR CARGAS INCOMPLETAS
-      if (!result || !result.content) {
-        throw new Error('Respuesta vacía o inválida del servidor');
-      }
-      
-      if (result.content.length < 100) {
-        throw new Error('Contenido insuficiente (Posible 404 o bloqueo del proxy)');
+      if (!result || !result.content || result.content.length < 100) {
+        throw new Error('Contenido insuficiente o vacío');
       }
 
-      // Rewrite URLs & Inject runtime
       let content = rewriteUrls(result.content, normalized);
       content = injectRuntime(content, normalized);
       
-      // Extract real <title>
       const titleMatch = content.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
       if (titleMatch && titleMatch[1].trim()) {
         tab.title = titleMatch[1].trim().slice(0, 60);
         renderTabs();
       }
 
-      // Cache rendered HTML
       tab.contentCache = tab.contentCache || {};
       tab.contentCache[normalized] = { html: content, title: tab.title };
 
-      // Create iframe with srcdoc
-      const iframe = createContentIframe(normalized, content, tab.muted);
-      
-      // Wait for iframe to load
-      const loadPromise = new Promise((resolve, reject) => {
-        iframe.onload = () => resolve();
-        iframe.onerror = () => reject(new Error('Failed to render page'));
-        setTimeout(() => reject(new Error('Render timeout')), 10000);
-      });
-      
-      contentArea.innerHTML = '';
-      contentArea.appendChild(iframe);
-      
-      await loadPromise;
-      
+      // Ocultar otros iframes
+      Array.from(contentArea.querySelectorAll('iframe')).forEach(iframe => { iframe.style.display = 'none'; });
+
+      let targetIframe = contentArea.querySelector(`iframe[data-peakx-tab-id="${tab.id}"]`);
+      if (!targetIframe) {
+        targetIframe = createContentIframe(normalized, content, tab.muted);
+        targetIframe.setAttribute('data-peakx-tab-id', tab.id);
+        contentArea.appendChild(targetIframe);
+      } else {
+        targetIframe.srcdoc = content;
+        targetIframe.setAttribute('data-peakx-url', normalized);
+      }
+      targetIframe.style.display = 'block';
+
       tab.isLoading = false;
       renderTabs();
       document.getElementById('loadingBar').classList.remove('active');
-      
-      // Update tunnel status
       tunnelStatus = 'connected';
       tunnelProxy = 'WISP';
       updateStatus();
       
-      // Save to history
       const history = JSON.parse(localStorage.getItem('peakx_history') || '[]');
       let hostName = ''; try { hostName = new URL(normalized).hostname; } catch (e) {}
       history.unshift({ title: tab.title, url: normalized, hostname: hostName, timestamp: Date.now() });
       localStorage.setItem('peakx_history', JSON.stringify(history.slice(0, 100)));
       
-      console.log('✅ Page loaded successfully');
-      
     } catch (error) {
-      console.error('❌ Navigation failed:', error.message);
-      
       tab.isLoading = false;
       renderTabs();
       document.getElementById('loadingBar').classList.remove('active');
       
-      // 2. SOLUCIÓN AL "UNKNOWN SERVER" / WISP CORTADO:
-      // Mostramos SIEMPRE la UI limpia de 404 para CUALQUIER error de red/fetch.
-      // 3. NO marcamos tunnelStatus como 'disconnected' para que el WISP no se "corte" visualmente.
-      
-      contentArea.innerHTML = `
-        <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:40px;text-align:center;">
-          <h1 style="font-size:48px;margin:0 0 16px;">🔍</h1>
-          <p style="color:#ef4444;font-size:26px;font-weight:700;margin:0 0 8px;">Error 404 - Invalid link or does not exist</p>
-          <p style="color:#fff;font-size:15px;margin:8px 0;">Please write the link correctly or make sure it exists.</p>
-          <p style="color:#444;font-size:12px;margin-top:16px;padding:12px;background:#111;border-radius:8px;word-break:break-all;max-width:400px;">${normalized}</p>
-          <div style="display:flex;gap:10px;margin-top:20px;">
-            <button onclick="navigateTo('${normalized}')" style="padding:10px 20px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">Retry</button>
-          </div>
-        </div>
-      `;
-      
-      console.warn('⚠️ Mostrando UI de 404 para:', normalized, '| Error original:', error.message);
+      contentArea.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:40px;text-align:center;"><h1 style="font-size:48px;margin:0 0 16px;">🔍</h1><p style="color:#ef4444;font-size:26px;font-weight:700;margin:0 0 8px;">Error 404 - Invalid link or does not exist</p><p style="color:#fff;font-size:15px;margin:8px 0;">Please write the link correctly or make sure it exists.</p><p style="color:#444;font-size:12px;margin-top:16px;padding:12px;background:#111;border-radius:8px;word-break:break-all;max-width:400px;">${normalized}</p><div style="display:flex;gap:10px;margin-top:20px;"><button onclick="navigateTo('${normalized}')" style="padding:10px 20px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">Retry</button></div></div>`;
+      console.warn('⚠️ Mostrando UI de 404 para:', normalized, '| Error:', error.message);
     }
   }
 
