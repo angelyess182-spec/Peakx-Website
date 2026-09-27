@@ -85,7 +85,8 @@
     const iframe = document.createElement('iframe');
     iframe.className = 'content-iframe';
     iframe.setAttribute('data-peakx-url', pageUrl);
-    iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups' + (muted ? '' : ' allow-autoplay'));
+        iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads');
+    iframe.setAttribute('allow', 'autoplay; camera; microphone; geolocation; fullscreen');
     iframe.srcdoc = html;
     return iframe;
   }
@@ -637,7 +638,13 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
             if (!src) return;
             try {
               const r = await wispFetch(src);
-              el.src = r.dataUrl || ('data:' + (r.contentType || 'image/png') + ';base64,' + r.base64);
+              if (r.dataUrl) {
+            el.src = r.dataUrl;
+          } else if (r.base64) {
+            el.src = 'data:' + (r.contentType || 'image/png') + ';base64,' + r.base64;
+          } else {
+            el.src = resolve(src);
+          }
             } catch (err) {
               // fallback: direct URL (may work if not blocked)
               el.src = resolve(src);
@@ -690,7 +697,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
           }
 
           async function replaceCssTokens(cssText, cssUrl) {
-            const matches = cssText.match(/url\("___PEAKXURL___[^_]*___"\)/g) || [];
+            const matches = cssText.match(/url\("___PEAKXURL___.*?___"\)/g) || [];
             let out = cssText;
             for (const m of matches) {
               const raw = m.slice(m.indexOf('___PEAKXURL___') + 14, m.lastIndexOf('___'));
@@ -749,6 +756,21 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
               return originalOpen.apply(this, arguments);
             };
           } catch (e) { console.warn('PEAKX: location hook limited', e); }
+      } catch (e) { console.warn('PEAKX: location hook limited', e); }
+
+      // ---- History pushState / replaceState interception (Fixes SecurityError in about:srcdoc) ----
+      try {
+        const origPushState = window.history.pushState;
+        const origReplaceState = window.history.replaceState;
+        window.history.pushState = function(state, title, url) {
+          try { return origPushState.apply(this, arguments); } catch (e) { return null; }
+        };
+        window.history.replaceState = function(state, title, url) {
+          try { return origReplaceState.apply(this, arguments); } catch (e) { return null; }
+        };
+      } catch (e) { console.warn('PEAKX: history hook limited', e); }
+
+      // ---- fetch / XMLHttpRequest interception via WISP ----
 
           // ---- fetch / XMLHttpRequest interception via WISP ----
           const origFetch = window.fetch.bind(window);
