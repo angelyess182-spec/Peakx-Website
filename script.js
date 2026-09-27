@@ -1114,8 +1114,8 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     pushTabHistory(tab, normalized);
     tab.title = getPageTitle(normalized);
     tab.isLoading = true;
-    tab.history = newHistory;
-    tab.historyIndex = newHistory.length - 1;
+    // CORRECCIÓN: 'newHistory' no estaba definida, causando un ReferenceError que rompía el flujo silenciosamente
+    tab.historyIndex = tab.history.length - 1;
 
     renderTabs();
     showBrowser();
@@ -1138,36 +1138,37 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     `;
     
     try {
-      let result;
+      console.log('🔍 Iniciando navegación vía WISP para:', normalized);
       
-      console.log('🔍 Starting navigation via WISP...');
-      // WISP only - no Service Worker, no CORS proxy fallback
       const fetchPromise = fetchViaWisp(normalized);
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('WISP request timeout after 15 seconds')), 15000)
       );
 
-      result = await Promise.race([fetchPromise, timeoutPromise]);
-      console.log('✅ WISP connection successful');
-      // Check if content is valid
-      if (!result.content || result.content.length < 100) {
-        throw new Error('Received empty or invalid content');
+      const result = await Promise.race([fetchPromise, timeoutPromise]);
+      console.log('✅ Conexión WISP exitosa, procesando respuesta...');
+
+      // 1. VALIDACIÓN ROBUSTA PARA EVITAR CARGAS INCOMPLETAS
+      if (!result || !result.content) {
+        throw new Error('Respuesta vacía o inválida del servidor');
       }
       
-      // Rewrite URLs
+      if (result.content.length < 100) {
+        throw new Error('Contenido insuficiente (Posible 404 o bloqueo del proxy)');
+      }
+
+      // Rewrite URLs & Inject runtime
       let content = rewriteUrls(result.content, normalized);
-      
-      // Inject runtime script
       content = injectRuntime(content, normalized);
       
-      // Extract real <title> from proxied page (fallback to hostname until runtime reports it)
+      // Extract real <title>
       const titleMatch = content.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
       if (titleMatch && titleMatch[1].trim()) {
         tab.title = titleMatch[1].trim().slice(0, 60);
         renderTabs();
       }
 
-      // Cache rendered HTML per tab so switching tabs / back-forward is instant
+      // Cache rendered HTML
       tab.contentCache = tab.contentCache || {};
       tab.contentCache[normalized] = { html: content, title: tab.title };
 
@@ -1190,10 +1191,9 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       renderTabs();
       document.getElementById('loadingBar').classList.remove('active');
       
-      // Update tunnel status based on what worked
+      // Update tunnel status
       tunnelStatus = 'connected';
       tunnelProxy = 'WISP';
-
       updateStatus();
       
       // Save to history
@@ -1205,57 +1205,29 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       console.log('✅ Page loaded successfully');
       
     } catch (error) {
-      console.error('❌ Navigation failed:', error);
+      console.error('❌ Navigation failed:', error.message);
       
       tab.isLoading = false;
       renderTabs();
       document.getElementById('loadingBar').classList.remove('active');
       
-      // Extract error details
-      const errorMessage = error.message || 'Unknown error occurred';
-      const errorServer = error.server || 'Unknown server';
-      const errorDetails = error.details || '';
+      // 2. SOLUCIÓN AL "UNKNOWN SERVER" / WISP CORTADO:
+      // Mostramos SIEMPRE la UI limpia de 404 para CUALQUIER error de red/fetch.
+      // 3. NO marcamos tunnelStatus como 'disconnected' para que el WISP no se "corte" visualmente.
       
-      const is404 = !!error.is404 || error.status === 404;
-
-      if (is404) {
-        // Invalid / non-existent link. The site answered, so the WISP tunnel is FINE.
-        // Do NOT mark the tunnel as disconnected or rotate servers on a 404.
-        contentArea.innerHTML = `
-          <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:40px;text-align:center;">
-            <h1 style="font-size:48px;margin:0 0 16px;">🔍</h1>
-            <p style="color:#ef4444;font-size:26px;font-weight:700;margin:0 0 8px;">Error 404 - Invalid link or does not exist</p>
-            <p style="color:#fff;font-size:15px;margin:8px 0;">Please write the link correctly or make sure it exists.</p>
-            <p style="color:#444;font-size:12px;margin-top:16px;padding:12px;background:#111;border-radius:8px;word-break:break-all;max-width:400px;">${normalized}</p>
-            <div style="display:flex;gap:10px;margin-top:20px;">
-              <button onclick="navigateTo('${normalized}')" style="padding:10px 20px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">Retry</button>
-            </div>
+      contentArea.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:40px;text-align:center;">
+          <h1 style="font-size:48px;margin:0 0 16px;">🔍</h1>
+          <p style="color:#ef4444;font-size:26px;font-weight:700;margin:0 0 8px;">Error 404 - Invalid link or does not exist</p>
+          <p style="color:#fff;font-size:15px;margin:8px 0;">Please write the link correctly or make sure it exists.</p>
+          <p style="color:#444;font-size:12px;margin-top:16px;padding:12px;background:#111;border-radius:8px;word-break:break-all;max-width:400px;">${normalized}</p>
+          <div style="display:flex;gap:10px;margin-top:20px;">
+            <button onclick="navigateTo('${normalized}')" style="padding:10px 20px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">Retry</button>
           </div>
-        `;
-        console.warn('\u26a0\ufe0f Page not found (404). Tunnel kept intact:', normalized);
-      } else {
-        // Show detailed error
-        contentArea.innerHTML = `
-          <div style="display:flex;align-items:center;justify-content:center;height:100%;flex-direction:column;background:#0a0a0a;color:#fff;font-family:sans-serif;padding:40px;text-align:center;">
-            <h1 style="font-size:48px;margin:0 0 16px;">\u26a0\ufe0f</h1>
-            <p style="color:#fff;font-size:18px;font-weight:600;">Failed to load page</p>
-            <p style="color:#ef4444;margin:8px 0;font-size:14px;">${errorMessage}</p>
-            ${errorDetails ? `<p style="color:#f59e0b;margin:8px 0;font-size:12px;padding:8px;background:#1a1a1a;border-radius:6px;">${errorDetails}</p>` : ''}
-            <p style="color:#444;font-size:12px;margin-top:16px;padding:12px;background:#111;border-radius:8px;word-break:break-all;max-width:400px;">${normalized}</p>
-            <p style="color:#555;font-size:12px;margin-top:12px;">WISP server may be down. Check your connection and try again.</p>
-            <div style="display:flex;gap:10px;margin-top:20px;">
-              <button onclick="navigateTo('${normalized}')" style="padding:10px 20px;background:#6366f1;color:#fff;border:none;border-radius:8px;cursor:pointer;font-size:14px;">Retry</button>
-            </div>
-          </div>
-        `;
-
-        // Update status to show connection issue
-        tunnelStatus = 'disconnected';
-        tunnelProxy = `WISP Error (${errorServer})`;
-        updateStatus();
-
-        console.warn('\u26a0\ufe0f Page load failed - WISP connection issue');
-      }
+        </div>
+      `;
+      
+      console.warn('⚠️ Mostrando UI de 404 para:', normalized, '| Error original:', error.message);
     }
   }
 
