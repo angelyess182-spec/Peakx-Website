@@ -986,8 +986,13 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     tabs.forEach(t => t.isActive = false);
     tabs.push(makeTabData(genId(), { isActive: true }));
     renderTabs();
+    saveTabs(); // Guardar estado
     
-    // Clear content area when creating new tab
+    // FIX BUG 1: Limpiar inputs al crear nueva tab
+    document.getElementById('navUrl').value = '';
+    document.getElementById('homeNavInput').value = '';
+    document.getElementById('currentUrl').textContent = '';
+    
     const contentArea = document.getElementById('contentArea');
     contentArea.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#333;background:#0a0a0a;"><p>Ready to browse</p></div>';
     
@@ -998,18 +1003,20 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     const idx = tabs.findIndex(t => t.id === id);
     const wasActive = tabs[idx]?.isActive;
     tabs = tabs.filter(t => t.id !== id);
+    saveTabs(); // Guardar al cerrar
     
     if (tabs.length === 0) {
       tabs.push(makeTabData(genId(), { isActive: true }));
       renderTabs();
+      saveTabs();
       showHome();
     } else if (wasActive) {
       tabs[tabs.length - 1].isActive = true;
       renderTabs();
+      saveTabs();
       const active = getActiveTab();
       if (active.url) {
         showBrowser();
-        // Restore content for the newly active tab
         const contentArea = document.getElementById('contentArea');
         document.getElementById('navUrl').value = active.url;
         document.getElementById('homeNavInput').value = active.url;
@@ -1020,6 +1027,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       }
     } else {
       renderTabs();
+      saveTabs();
     }
   }
 
@@ -1637,6 +1645,57 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
       handlePeakxUrl(event, d);
     }
   });
+  // ===== Tab Persistence (LocalStorage) =====
+  function saveTabs() {
+    try {
+      const tabsToSave = tabs.map(t => ({
+        id: t.id,
+        url: t.url,
+        title: t.title,
+        isActive: t.isActive,
+        history: t.history,
+        historyIndex: t.historyIndex,
+        muted: t.muted,
+        pinned: t.pinned
+        // Excluimos contentCache para no exceder 5MB
+      }));
+      localStorage.setItem('peakx_tabs', JSON.stringify(tabsToSave));
+    } catch (e) {
+      console.warn('Failed to save tabs:', e);
+    }
+  }
+
+  function loadTabs() {
+    try {
+      const saved = localStorage.getItem('peakx_tabs');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          let hasActive = false;
+          tabs = parsed.map(t => {
+            if (t.isActive) hasActive = true;
+            return makeTabData(t.id, {
+              url: t.url || '',
+              title: t.title || 'New Tab',
+              isActive: t.isActive,
+              history: t.history || [],
+              historyIndex: t.historyIndex || -1,
+              muted: t.muted || false,
+              pinned: t.pinned || false
+            });
+          });
+          if (!hasActive && tabs.length > 0) {
+            tabs[0].isActive = true;
+          }
+          console.log('✅ Tabs restored from localStorage');
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load tabs:', e);
+    }
+    tabs = [makeTabData(genId(), { isActive: true })];
+  }
 
   // ===== Init =====
   console.log('🚀 PEAKX Browser starting...');
@@ -1648,7 +1707,8 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
   }
   
   try {
-    loadBlacklist(); // async; uses hardcoded fallback if file missing (e.g. opened via file://)
+    loadTabs(); // Cargar tabs guardadas
+    loadBlacklist();
     createParticles();
     updateClock();
     setInterval(updateClock, 1000);
