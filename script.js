@@ -769,7 +769,9 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
               if (url && !/^javascript:/i.test(url)) { navTo(url); return null; }
               return originalOpen.apply(this, arguments);
             };
-          } catch (e) { console.warn('PEAKX: location hook limited', e); }
+                    } catch (e) { console.warn('PEAKX: location hook limited', e); }
+
+          // ---- History pushState / replaceState interception (Fixes SecurityError in about:srcdoc) ----
 
           // ---- History pushState / replaceState interception (Fixes SecurityError in about:srcdoc) ----
           try {
@@ -922,10 +924,11 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
         const item = document.createElement('div');
         item.className = 'tab-item' + (tab.isActive ? ' active' : '') + (tab.pinned ? ' pinned' : '');
         item.setAttribute('data-tab-id', tab.id);
+        item.draggable = true;
+        
         // Tooltip con info real de la tab
         const tooltipText = tab.url ? `${tab.title}\n${tab.url}` : 'New Tab';
         item.setAttribute('data-tooltip', tooltipText);
-        item.draggable = true;
         
         let faviconHtml = '';
         const defaultIcon = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23888'%3E%3Cpath d='M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z'/%3E%3C/svg%3E";
@@ -938,10 +941,20 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
             faviconHtml = `<img src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=32" style="width:16px;height:16px;border-radius:2px;margin-right:6px;pointer-events:none;background:#fff;" onerror="this.src='${defaultIcon}'" />`;
           } catch(e) {
             faviconHtml = `<img src="${defaultIcon}" style="width:16px;height:16px;margin-right:6px;opacity:0.7;" />`;
+            console.warn('Invalid URL for favicon:', tab.url);
           }
         } else {
           faviconHtml = `<img src="${defaultIcon}" style="width:16px;height:16px;margin-right:6px;opacity:0.7;" />`;
         }
+        
+        item.innerHTML = (tab.isLoading ? '' : faviconHtml) + '<span class="tab-title">' + tab.title + '</span><span class="tab-close" data-id="' + tab.id + '">×</span>';
+        
+        item.addEventListener('click', (e) => {
+          if (e.target.classList.contains('tab-close')) {
+            closeTab(tab.id);
+          } else {
+            switchTab(tab.id);
+          }
         });
 
         item.addEventListener('contextmenu', (e) => {
@@ -1034,41 +1047,35 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
   }
 
   function switchTab(id) {
-    tabs.forEach(t => t.isActive = t.id === id);
+    tabs.forEach(t => t.isActive = (t.id === id));
     renderTabs();
-    const active = getActiveTab();
+    saveTabs(); // FIX: Guardar estado al cambiar de tab para recordar la activa
     
+    const active = getActiveTab();
     if (active.url) {
       showBrowser();
-      // Restore the content for this tab
       const contentArea = document.getElementById('contentArea');
-      
-      // Update URL bar
       document.getElementById('navUrl').value = active.url;
       document.getElementById('homeNavInput').value = active.url;
       document.getElementById('currentUrl').textContent = active.url;
       updateNavButtons();
       
-      // Keep the live iframe if it belongs to this tab (preserves session/scroll/state).
-      // Only recreate from cache if the current iframe is missing or belongs to another URL.
       const existing = contentArea.querySelector('iframe');
       if (existing && existing.getAttribute('data-peakx-url') === active.url) {
-        // nothing to do: live DOM restored as-is
+        // Live DOM restored as-is
       } else if (active.contentCache && active.contentCache[active.url]) {
         const cached = active.contentCache[active.url];
         contentArea.innerHTML = '';
         contentArea.appendChild(createContentIframe(active.url, cached.html, active.muted));
       } else {
-        // No cache for this tab yet -> load it
         navigateTo(active.url, active.id);
       }
     } else {
       showHome();
-      // Clear content area (contentArea already declared above)
+      const contentArea = document.getElementById('contentArea');
       contentArea.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#333;background:#0a0a0a;"><p>Ready to browse</p></div>';
     }
   }
-
   function showHome() {
     document.getElementById('homeScreen').classList.remove('hidden');
     document.getElementById('browserView').classList.remove('active');
@@ -1717,7 +1724,7 @@ async function fetchViaWisp(url, retryCount = 0, serverIndex = 0) {
     renderFavorites();
     renderTabs();
     
-    // FIX: Si la tab activa restaurada no tiene caché, recargarla automáticamente
+    // FIX: Si la tab activa restaurada no tiene caché en memoria, recargarla
     const activeTab = getActiveTab();
     if (activeTab && activeTab.url && (!activeTab.contentCache || !activeTab.contentCache[activeTab.url])) {
       console.log('🔄 Restoring content for active tab:', activeTab.url);
